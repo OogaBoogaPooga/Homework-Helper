@@ -8,7 +8,6 @@
 (() => {
   'use strict';
 
-  // ---- kill-switch infrastructure ----
   let KILLED = false;
   const __timers = new Set();
   const ABORT = new AbortController();
@@ -21,7 +20,7 @@
 
   const CFG = {
     ai: {
-      key: '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',
+      key: 'PASTE_YOUR_GROQ_KEY_HERE',
       model: 'openai/gpt-oss-120b',
       url: 'https://api.groq.com/openai/v1/chat/completions',
       temperature: 0.2,
@@ -76,7 +75,6 @@
     } catch {}
   }
 
-  // ---- DOM scrape ----
   function getQuestionBlocks() {
     return [...document.querySelectorAll('lib-question')].filter(b => b.offsetParent !== null);
   }
@@ -132,7 +130,6 @@
     el.dispatchEvent(new MouseEvent('click', o));
   }
 
-  // ---- Groq ----
   async function groqChat(messages, opts = {}) {
     if (KILLED) throw new Error('killed');
     const stream = !!opts.stream;
@@ -216,7 +213,6 @@ Reply with JSON only.`;
     return { picks: [...new Set(nums)].filter(n => n >= 1 && n <= max), why: '' };
   }
 
-  // ---- auto loop ----
   async function processQuestion(block) {
     if (KILLED) return false;
     const choices = getChoices(block);
@@ -330,7 +326,6 @@ Reply with JSON only.`;
 
   function stop() { S.running = false; render(); }
 
-  // ---- smart start ----
   function startSmart() {
     if (KILLED) return;
     ensureAudio();
@@ -353,7 +348,6 @@ Reply with JSON only.`;
     }
   }
 
-  // ---- chat ----
   async function sendChat(text) {
     if (KILLED || !text.trim()) return;
     S.chat.push({ role: 'user', content: text });
@@ -388,7 +382,6 @@ Reply with JSON only.`;
     render();
   }
 
-  // ---- UI ----
   const ID = '__helper_ui';
   const PID = '__helper_panel';
 
@@ -697,7 +690,6 @@ Reply with JSON only.`;
     }, SIG);
   }
 
-  // ---- FULL TEARDOWN ----
   function nuke(reason) {
     if (KILLED) return;
     KILLED = true;
@@ -715,8 +707,6 @@ Reply with JSON only.`;
     try { if (window.__forge) delete window.__forge; } catch {}
     try { delete window.__cinder; } catch {}
     console.log('%c[helper] KILLED — panel removed, timers cleared, listeners aborted, globals deleted. Paste the loader again to reload.', 'color:#e07b39;font-weight:bold');
-    // reason kept for debugging — uncomment if you want it logged
-    // console.log('kill reason:', reason);
   }
 
   function renderLog() {
@@ -782,7 +772,7 @@ Reply with JSON only.`;
 })();
 
 // ============================================================
-// FORGE (universal classwork forger) — v2 with voice + deep scrape
+// FORGE (universal classwork forger) — v3 with body-diff scrape
 // ============================================================
 (() => {
   'use strict';
@@ -816,18 +806,8 @@ Reply with JSON only.`;
 
   const cleanText = t => String(t).replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
 
-  // ---- deeper step tab detection ----
   function findStepTabs() {
-    // Common Buzz / Angular tab patterns
-    const sel = [
-      '[role="tab"]',
-      '.mdc-tab',
-      '.nav-item',
-      '.nav-link',
-      'li[role="presentation"]',
-      'button'
-    ].join(',');
-    return [...document.querySelectorAll(sel)]
+    return [...document.querySelectorAll('button, a, li, [role="tab"], .nav-item, .nav-link, .mdc-tab')]
       .filter(el => el.offsetParent !== null)
       .filter(el => {
         const t = (el.textContent || '').trim();
@@ -836,11 +816,12 @@ Reply with JSON only.`;
       .filter((el, i, arr) => arr.findIndex(x => x.textContent.trim() === el.textContent.trim()) === i);
   }
 
+  // content root for fallback single-page scrape — no lib-managed-html (it's a breadcrumb on Buzz)
   function findContentRoot() {
     const sels = [
       '[role="tabpanel"]',
       '.mdc-tab-content',
-      '[role="main"]',       // <<< the real content on Buzz
+      '[role="main"]',
       'main',
       'article'
     ];
@@ -853,6 +834,59 @@ Reply with JSON only.`;
     return document.body;
   }
 
+  // pull only the lines in `after` that aren't in `before`
+  function extractDelta(before, after) {
+    const beforeSet = new Set(before.split('\n'));
+    const lines = after.split('\n');
+    const newIdx = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i] && !beforeSet.has(lines[i])) newIdx.push(i);
+    }
+    if (!newIdx.length) return after;
+    const lo = newIdx[0];
+    const hi = newIdx[newIdx.length - 1] + 1;
+    return lines.slice(lo, hi).join('\n').trim();
+  }
+
+  async function scrapeAllSteps() {
+    const tabs = findStepTabs();
+    log('found', tabs.length, 'step tabs');
+    const out = [];
+    if (!tabs.length) {
+      out.push({ label: 'Page', content: cleanText(findContentRoot().innerText) });
+      return out;
+    }
+
+    const snapshot = () => cleanText(document.body.innerText);
+    let prev = snapshot();
+
+    const activeNow = tabs.find(t =>
+      /active|selected/i.test(t.className) ||
+      t.getAttribute('aria-selected') === 'true' ||
+      t.classList.contains('mdc-tab--active')
+    ) || tabs[0];
+
+    for (const tab of tabs) {
+      if (isDead()) return out;
+      const label = tab.textContent.trim();
+      tab.click();
+      let now = prev;
+      const start = Date.now();
+      while (Date.now() - start < 2200) {
+        await sleep(150);
+        now = snapshot();
+        if (now !== prev) break;
+      }
+      const content = extractDelta(prev, now);
+      out.push({ label, content });
+      log('scraped:', label, content.length, 'chars');
+      prev = now;
+    }
+    activeNow.click();
+    await sleep(300);
+    return out;
+  }
+
   function findEditableFields() {
     const tas = [...document.querySelectorAll('textarea')].filter(t => t.offsetParent !== null && (t.value || '').length > 20);
     const ces = [...document.querySelectorAll('[contenteditable="true"]')].filter(t => t.offsetParent !== null && (t.innerText || '').length > 20);
@@ -862,63 +896,58 @@ Reply with JSON only.`;
     }));
   }
 
-  // ---- prompt: voice-first ----
   function buildForgePrompt(steps, userCtx, styleSample, existingFields) {
     const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 3200)}`).join('\n\n');
 
     const ctxBlock = userCtx && userCtx.trim()
-      ? `\n\nSTUDENT'S PROJECT CONTEXT:\n"""\n${userCtx.trim().slice(0, 1200)}\n"""`
-      : `\n\nNo project context — if the assignment says "your project", write generically but coherently.`;
+      ? `\n\nSTUDENT'S PROJECT — every deliverable must be about THIS:\n"""\n${userCtx.trim().slice(0, 1200)}\n"""`
+      : `\n\nNO PROJECT CONTEXT GIVEN. If any step says "your project", "your AI", or "your proposal", write exactly "[NEED PROJECT CONTEXT — paste it in the Forge tab]" as that deliverable. Do NOT invent a project.`;
 
     const styleBlock = styleSample && styleSample.trim()
-      ? `\n\nSTUDENT'S OWN WRITING SAMPLE (match this voice, tone, sentence length, vocabulary — this is the most important instruction):\n"""\n${styleSample.trim().slice(0, 1400)}\n"""`
+      ? `\n\nSTUDENT'S VOICE SAMPLE (copy this style):\n"""\n${styleSample.trim().slice(0, 1400)}\n"""`
       : '';
 
     const fieldsBlock = existingFields.length
-      ? `\n\nEXISTING EDITABLE TEXT ALREADY ON THE PAGE (extend, don't contradict):\n` +
+      ? `\n\nEXISTING TEXT ON PAGE:\n` +
         existingFields.map((f, i) => `[field ${i + 1}${f.hint ? ' — ' + f.hint : ''}]\n${f.value}`).join('\n\n')
       : '';
 
-    return `You are a real high-school or college student completing a class assignment. Your output gets pasted verbatim into a submission box. It must sound like a real student wrote it — not like AI, not like a textbook, not like an essay.
+    return `You are a real student completing a class assignment. Your output gets pasted verbatim into a submission box.
 
-VOICE RULES (non-negotiable):
-- Write at a 10th–11th grade reading level. Plain words. Short sentences.
-- Use contractions: I'm, it's, doesn't, can't, won't, that's.
-- Say "it" or "my AI" or "my project" — NEVER "the system", "the platform", "the AI application", "the solution".
-- Never use semicolons.
-- Never use: furthermore, moreover, additionally, it is important to note, in conclusion, it's worth noting, one must consider, plays a crucial role, serves as a, leverages, facilitates, encompasses, delineates, underscores, optimal.
-- Don't start multiple sentences the same way.
-- Bullets ONLY if the assignment explicitly asks for a list. Otherwise write flowing paragraphs.
-- No markdown headers inside the answer (no "##", no "**bold**"). Plain prose.
-- Answer the question in the order it's asked. If the assignment has sub-questions, answer each one in a sentence or two — don't skip any.
+=== STRUCTURE ===
+Assignment has these steps in order: ${steps.map(s => s.label).join(' | ')}
+Produce ONE deliverable for EVERY step, in the same order. Never merge two different steps.
+If a step's content is empty or under 80 chars, write "[no content scraped]" for it — do NOT invent.
+Label each deliverable EXACTLY as the step is labeled.
+Only merge if two step labels are literally the same words.
 
-DEPTH RULES:
-- For EVERY task/step/prompt/section the assignment asks for, produce ONE deliverable.
-- Mirror the assignment's own structure. 4 steps → 4 deliverables. 1 essay → 1 deliverable.
-- If two asks in the assignment are clearly the same thing (e.g. Step 3 says "fill in the template section" and there's also a separate "Template Section" heading), merge them into ONE deliverable with a combined label.
-- If a step asks 2–3 sub-questions, they all go inside that one deliverable, answered in order, in prose.
-- Each deliverable: 100–300 words. Not padded. Not repeated.
-- Use the assignment's actual wording when naming deliverables.
+=== CONTENT ===
+Every deliverable must reference the STUDENT'S project by name or a clear descriptor.
+If a step has sub-questions, answer each one inside that one deliverable, in order.
+Answer what the step asks. Don't restate it. Don't pad.
+100–250 words per deliverable.
 
-Assignment content (every step panel scraped):
+=== VOICE ===
+- 10th grade reading level. Plain words. Short sentences.
+- Contractions: I'm, it's, doesn't, can't, won't.
+- Say "it", "my project", "my AI" — NEVER "the system", "the platform", "the AI application".
+- No semicolons. No markdown headers (no ##, no **bold**). Plain prose.
+- Bullets only if the step itself is a list prompt.
+- Ban: furthermore, moreover, additionally, in conclusion, plays a crucial role, leverages, facilitates, underscores, optimal, robust.
+- Don't start two sentences the same way.
+- Don't sound like a status update unless the step asks for one.
+
+=== ASSIGNMENT CONTENT (scraped step by step) ===
 ${stepBlob}${ctxBlock}${styleBlock}${fieldsBlock}
 
-Return STRICT JSON only — no prose, no markdown fences. Schema:
+Return STRICT JSON only:
 {
   "assignment_title": "<inferred>",
   "deliverables": [
-    {
-      "label": "<exact step / section name>",
-      "answer": "<plain prose, student voice, 100–300 words>"
-    }
+    { "label": "<exact step label>", "answer": "<100–250 words, student voice, about the student's project>" }
   ]
 }
-
-Rules recap:
-- Merge redundant asks.
-- One deliverable per distinct ask.
-- Plain prose only. No headers. No bullets unless the assignment asks for them.
-- Output JSON only. No backticks. No commentary outside the JSON.`;
+No backticks. No commentary. JSON only.`;
   }
 
   function parseForge(raw) {
@@ -939,7 +968,7 @@ Rules recap:
       body: JSON.stringify({
         model: CFG.ai.model,
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.65,
+        temperature: 0.35,
         max_tokens: maxTokens || 3000,
         response_format: { type: 'json_object' }
       })
@@ -1010,8 +1039,8 @@ Rules recap:
     view.innerHTML = `
       <div class="h-label">Project context (what your final project is)</div>
       <textarea id="${PID}_forgeCtx" class="h-input" style="height:52px;font-size:11px;resize:vertical;" placeholder="e.g. My final project is a study app that makes practice questions from notes."></textarea>
-      <div class="h-label">Your writing sample (paste 3–5 sentences you wrote — the model will match your voice)</div>
-      <textarea id="${PID}_forgeStyle" class="h-input" style="height:64px;font-size:11px;resize:vertical;" placeholder="Paste any paragraph you wrote yourself. This teaches the model how you actually sound."></textarea>
+      <div class="h-label">Your writing sample (paste a few sentences you wrote)</div>
+      <textarea id="${PID}_forgeStyle" class="h-input" style="height:64px;font-size:11px;resize:vertical;" placeholder="Paste any paragraph you wrote yourself. The model will match your voice."></textarea>
       <div class="h-row" style="margin-top:6px;">
         <button class="h-btn h-btn-primary" id="${PID}_forgeGo">Forge This Assignment</button>
         <button class="h-btn h-btn-ghost" id="${PID}_forgeCopyAll">Copy All</button>
@@ -1057,7 +1086,11 @@ Rules recap:
     const sEl = document.getElementById(PID + '_forgeSteps');
     if (sEl) {
       sEl.innerHTML = F.scrapedSteps.length
-        ? F.scrapedSteps.map(s => `<div>• ${escapeHtml(s.label)} — ${s.content.length} chars</div>`).join('')
+        ? F.scrapedSteps.map(s => {
+            const head = escapeHtml(s.content.slice(0, 90).replace(/\n/g, ' '));
+            const bad = s.content.length < 200 ? ' style="color:#ef5350;"' : '';
+            return `<div${bad}>• <b>${escapeHtml(s.label)}</b> — ${s.content.length} chars<br><span style="color:#666;font-size:10px;">${head}…</span></div>`;
+          }).join('')
         : '<div>—</div>';
     }
     const out = document.getElementById(PID + '_forgeOut');
