@@ -782,7 +782,7 @@ Reply with JSON only.`;
 })();
 
 // ============================================================
-// FORGE (universal classwork forger)
+// FORGE (universal classwork forger) — v2 with voice + deep scrape
 // ============================================================
 (() => {
   'use strict';
@@ -793,15 +793,17 @@ Reply with JSON only.`;
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const log = (...a) => { if (!isDead()) console.log('%c[helper]', 'color:#e07b39;font-weight:bold', ...a); };
 
-  // register kill hook so nuke() can freeze this module too
   (window.__helperKillHooks = window.__helperKillHooks || []).push(() => { FORGE_DEAD = true; });
 
   const LS_KEY = '__helper_forge_ctx';
   const LS_HIST = '__helper_forge_hist';
+  const LS_STYLE = '__helper_forge_style';
 
   const Ctx = {
     project: localStorage.getItem(LS_KEY) || '',
-    save(v) { this.project = v; localStorage.setItem(LS_KEY, v); }
+    style: localStorage.getItem(LS_STYLE) || '',
+    saveProject(v) { this.project = v; localStorage.setItem(LS_KEY, v); },
+    saveStyle(v) { this.style = v; localStorage.setItem(LS_STYLE, v); }
   };
 
   const F = {
@@ -814,20 +816,59 @@ Reply with JSON only.`;
 
   const cleanText = t => String(t).replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
 
+  // ---- deeper step tab detection ----
   function findStepTabs() {
-    return [...document.querySelectorAll('button, a, li, [role="tab"], .nav-item, .nav-link')]
+    // Common Buzz / Angular tab patterns
+    const sel = [
+      '[role="tab"]',
+      '.mdc-tab',
+      '.nav-item',
+      '.nav-link',
+      'li[role="presentation"]',
+      'button'
+    ].join(',');
+    return [...document.querySelectorAll(sel)]
       .filter(el => el.offsetParent !== null)
-      .filter(el => /^(overview|step\s*\d+|introduction|summary|submit|part\s*\d+|section\s*\d+)$/i.test((el.textContent || '').trim()))
+      .filter(el => {
+        const t = (el.textContent || '').trim();
+        return /^(overview|step\s*\d+|introduction|summary|submit|part\s*\d+|section\s*\d+|lesson\s*\d+)$/i.test(t);
+      })
       .filter((el, i, arr) => arr.findIndex(x => x.textContent.trim() === el.textContent.trim()) === i);
   }
+
   function findContentRoot() {
-    const sels = ['main', '[role="main"]', '.assignment-content', 'lib-managed-html', 'article', '.content-body', '#content'];
+    // prefer real tab panels, then fall back
+    const sels = [
+      '[role="tabpanel"]',
+      '.mdc-tab-content',
+      'lib-managed-html',
+      '.assignment-content',
+      'main [role="main"]',
+      'main',
+      '[role="main"]',
+      'article'
+    ];
     for (const sel of sels) {
-      const el = document.querySelector(sel);
-      if (el && el.offsetParent !== null && (el.innerText || '').length > 100) return el;
+      const els = [...document.querySelectorAll(sel)].filter(el => el.offsetParent !== null);
+      for (const el of els) {
+        if ((el.innerText || '').length > 80) return el;
+      }
     }
     return document.body;
   }
+
+  async function waitForPanelChange(prevText, timeoutMs = 2500) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (isDead()) return null;
+      const now = cleanText(findContentRoot().innerText);
+      // meaningful change — not just a whitespace diff, and long enough to be real content
+      if (now.length > 40 && now !== prevText && Math.abs(now.length - prevText.length) > 20) return now;
+      await sleep(120);
+    }
+    return cleanText(findContentRoot().innerText);
+  }
+
   async function scrapeAllSteps() {
     const tabs = findStepTabs();
     log('found', tabs.length, 'step tabs');
@@ -837,23 +878,29 @@ Reply with JSON only.`;
       return out;
     }
     const activeNow = tabs.find(t =>
-      t.classList.contains('active') ||
       t.getAttribute('aria-selected') === 'true' ||
+      t.classList.contains('active') ||
+      t.classList.contains('mdc-tab--active') ||
       /active|selected/i.test(t.className)
     ) || tabs[0];
+
+    // baseline before we start clicking
+    let prev = cleanText(findContentRoot().innerText);
+
     for (const tab of tabs) {
       if (isDead()) return out;
       const label = tab.textContent.trim();
       tab.click();
-      await sleep(450);
-      if (isDead()) return out;
-      out.push({ label, content: cleanText(findContentRoot().innerText) });
-      log('scraped:', label, out[out.length - 1].content.length);
+      const changed = await waitForPanelChange(prev, 2500);
+      if (changed) prev = changed;
+      out.push({ label, content: prev });
+      log('scraped:', label, prev.length);
     }
     activeNow.click();
     await sleep(200);
     return out;
   }
+
   function findEditableFields() {
     const tas = [...document.querySelectorAll('textarea')].filter(t => t.offsetParent !== null && (t.value || '').length > 20);
     const ces = [...document.querySelectorAll('[contenteditable="true"]')].filter(t => t.offsetParent !== null && (t.innerText || '').length > 20);
@@ -863,40 +910,65 @@ Reply with JSON only.`;
     }));
   }
 
-  function buildForgePrompt(steps, userCtx, existingFields) {
-    const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 2600)}`).join('\n\n');
+  // ---- prompt: voice-first ----
+  function buildForgePrompt(steps, userCtx, styleSample, existingFields) {
+    const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 3200)}`).join('\n\n');
+
     const ctxBlock = userCtx && userCtx.trim()
-      ? `\n\nSTUDENT'S ONGOING PROJECT CONTEXT (reference this when the assignment asks about "your project"):\n"""\n${userCtx.trim().slice(0, 1200)}\n"""`
-      : `\n\nNo project context provided — if the assignment references "your project" or "your proposal", write generically but coherently.`;
+      ? `\n\nSTUDENT'S PROJECT CONTEXT:\n"""\n${userCtx.trim().slice(0, 1200)}\n"""`
+      : `\n\nNo project context — if the assignment says "your project", write generically but coherently.`;
+
+    const styleBlock = styleSample && styleSample.trim()
+      ? `\n\nSTUDENT'S OWN WRITING SAMPLE (match this voice, tone, sentence length, vocabulary — this is the most important instruction):\n"""\n${styleSample.trim().slice(0, 1400)}\n"""`
+      : '';
+
     const fieldsBlock = existingFields.length
-      ? `\n\nEXISTING EDITABLE TEXT ALREADY ON THE PAGE (match this voice; extend, don't contradict):\n` +
+      ? `\n\nEXISTING EDITABLE TEXT ALREADY ON THE PAGE (extend, don't contradict):\n` +
         existingFields.map((f, i) => `[field ${i + 1}${f.hint ? ' — ' + f.hint : ''}]\n${f.value}`).join('\n\n')
       : '';
-    return `You are a student completing a class assignment. Your output will be pasted verbatim into a submission box. Write in first person, as the student. Be specific, concrete, and address the assignment's actual language. No hedging, no "as an AI", no meta commentary.
 
-Read the assignment carefully. Then, for EVERY task, step, prompt, section, or question it asks for, produce ONE deliverable. Mirror the assignment's own structure — if it asks for 4 steps, return 4 deliverables named after those steps. If it's one essay prompt, return one deliverable. If it asks for a template section, return that section.
+    return `You are a real high-school or college student completing a class assignment. Your output gets pasted verbatim into a submission box. It must sound like a real student wrote it — not like AI, not like a textbook, not like an essay.
 
-Assignment content (all steps already scraped):
-${stepBlob}${ctxBlock}${fieldsBlock}
+VOICE RULES (non-negotiable):
+- Write at a 10th–11th grade reading level. Plain words. Short sentences.
+- Use contractions: I'm, it's, doesn't, can't, won't, that's.
+- Say "it" or "my AI" or "my project" — NEVER "the system", "the platform", "the AI application", "the solution".
+- Never use semicolons.
+- Never use: furthermore, moreover, additionally, it is important to note, in conclusion, it's worth noting, one must consider, plays a crucial role, serves as a, leverages, facilitates, encompasses, delineates, underscores, optimal.
+- Don't start multiple sentences the same way.
+- Bullets ONLY if the assignment explicitly asks for a list. Otherwise write flowing paragraphs.
+- No markdown headers inside the answer (no "##", no "**bold**"). Plain prose.
+- Answer the question in the order it's asked. If the assignment has sub-questions, answer each one in a sentence or two — don't skip any.
 
-Return STRICT JSON only — no prose, no markdown fences, no preamble. Schema:
+DEPTH RULES:
+- For EVERY task/step/prompt/section the assignment asks for, produce ONE deliverable.
+- Mirror the assignment's own structure. 4 steps → 4 deliverables. 1 essay → 1 deliverable.
+- If two asks in the assignment are clearly the same thing (e.g. Step 3 says "fill in the template section" and there's also a separate "Template Section" heading), merge them into ONE deliverable with a combined label.
+- If a step asks 2–3 sub-questions, they all go inside that one deliverable, answered in order, in prose.
+- Each deliverable: 100–300 words. Not padded. Not repeated.
+- Use the assignment's actual wording when naming deliverables.
+
+Assignment content (every step panel scraped):
+${stepBlob}${ctxBlock}${styleBlock}${fieldsBlock}
+
+Return STRICT JSON only — no prose, no markdown fences. Schema:
 {
-  "assignment_title": "<inferred from page>",
+  "assignment_title": "<inferred>",
   "deliverables": [
     {
-      "label": "<exact step / section / prompt name from the assignment>",
-      "answer": "<the full text the student pastes. Plain prose. Multi-paragraph ok. 100–400 words per deliverable unless the step clearly wants more.>"
+      "label": "<exact step / section name>",
+      "answer": "<plain prose, student voice, 100–300 words>"
     }
   ]
 }
 
-Rules:
-- One deliverable per distinct ask. Do not merge steps. Do not invent steps.
-- If a step asks sub-questions, answer them inside that deliverable as flowing prose.
-- Use the assignment's own vocabulary.
-- Never include headings like "Step 1:" inside the answer — the label already carries that.
+Rules recap:
+- Merge redundant asks.
+- One deliverable per distinct ask.
+- Plain prose only. No headers. No bullets unless the assignment asks for them.
 - Output JSON only. No backticks. No commentary outside the JSON.`;
   }
+
   function parseForge(raw) {
     let s = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
     const m = s.match(/\{[\s\S]*\}/);
@@ -905,6 +977,7 @@ Rules:
     if (!Array.isArray(o.deliverables)) throw new Error('no deliverables array');
     return o;
   }
+
   async function groqJson(prompt, maxTokens) {
     if (isDead()) throw new Error('killed');
     const CFG = window.__cinder.CFG;
@@ -914,8 +987,8 @@ Rules:
       body: JSON.stringify({
         model: CFG.ai.model,
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.45,
-        max_tokens: maxTokens || 2600,
+        temperature: 0.65,
+        max_tokens: maxTokens || 3000,
         response_format: { type: 'json_object' }
       })
     });
@@ -938,7 +1011,7 @@ Rules:
         renderForge(); return;
       }
       const fields = findEditableFields();
-      const prompt = buildForgePrompt(steps, Ctx.project, fields);
+      const prompt = buildForgePrompt(steps, Ctx.project, Ctx.style, fields);
       log('prompt', prompt.length, 'chars — calling', window.__cinder.CFG.ai.model);
       const raw = await groqJson(prompt);
       if (isDead()) return;
@@ -983,8 +1056,10 @@ Rules:
     view.dataset.view = 'forge';
     view.style.display = 'none';
     view.innerHTML = `
-      <div class="h-label">Your project context (saved — one line or a paragraph)</div>
-      <textarea id="${PID}_forgeCtx" class="h-input" style="height:56px;font-size:11px;resize:vertical;" placeholder="e.g. My final project is a study companion app that generates practice questions from student notes."></textarea>
+      <div class="h-label">Project context (what your final project is)</div>
+      <textarea id="${PID}_forgeCtx" class="h-input" style="height:52px;font-size:11px;resize:vertical;" placeholder="e.g. My final project is a study app that makes practice questions from notes."></textarea>
+      <div class="h-label">Your writing sample (paste 3–5 sentences you wrote — the model will match your voice)</div>
+      <textarea id="${PID}_forgeStyle" class="h-input" style="height:64px;font-size:11px;resize:vertical;" placeholder="Paste any paragraph you wrote yourself. This teaches the model how you actually sound."></textarea>
       <div class="h-row" style="margin-top:6px;">
         <button class="h-btn h-btn-primary" id="${PID}_forgeGo">Forge This Assignment</button>
         <button class="h-btn h-btn-ghost" id="${PID}_forgeCopyAll">Copy All</button>
@@ -1004,7 +1079,11 @@ Rules:
 
     const ctxEl = document.getElementById(PID + '_forgeCtx');
     ctxEl.value = Ctx.project;
-    ctxEl.oninput = () => Ctx.save(ctxEl.value);
+    ctxEl.oninput = () => Ctx.saveProject(ctxEl.value);
+
+    const styleEl = document.getElementById(PID + '_forgeStyle');
+    styleEl.value = Ctx.style;
+    styleEl.oninput = () => Ctx.saveStyle(styleEl.value);
 
     document.getElementById(PID + '_forgeGo').onclick = forge;
     document.getElementById(PID + '_forgeCopyAll').onclick = copyAll;
