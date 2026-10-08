@@ -20,7 +20,7 @@
 
   const CFG = {
     ai: {
-      key: 'PASTE_YOUR_GROQ_KEY_HERE',
+      key: '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',
       model: 'openai/gpt-oss-120b',
       url: 'https://api.groq.com/openai/v1/chat/completions',
       temperature: 0.2,
