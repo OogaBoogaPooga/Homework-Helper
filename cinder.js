@@ -837,68 +837,20 @@ Reply with JSON only.`;
   }
 
   function findContentRoot() {
-    // prefer real tab panels, then fall back
     const sels = [
       '[role="tabpanel"]',
       '.mdc-tab-content',
-      'lib-managed-html',
-      '.assignment-content',
-      'main [role="main"]',
+      '[role="main"]',       // <<< the real content on Buzz
       'main',
-      '[role="main"]',
       'article'
     ];
     for (const sel of sels) {
       const els = [...document.querySelectorAll(sel)].filter(el => el.offsetParent !== null);
       for (const el of els) {
-        if ((el.innerText || '').length > 80) return el;
+        if ((el.innerText || '').length > 300) return el;
       }
     }
     return document.body;
-  }
-
-  async function waitForPanelChange(prevText, timeoutMs = 2500) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (isDead()) return null;
-      const now = cleanText(findContentRoot().innerText);
-      // meaningful change — not just a whitespace diff, and long enough to be real content
-      if (now.length > 40 && now !== prevText && Math.abs(now.length - prevText.length) > 20) return now;
-      await sleep(120);
-    }
-    return cleanText(findContentRoot().innerText);
-  }
-
-  async function scrapeAllSteps() {
-    const tabs = findStepTabs();
-    log('found', tabs.length, 'step tabs');
-    const out = [];
-    if (!tabs.length) {
-      out.push({ label: 'Page', content: cleanText(findContentRoot().innerText) });
-      return out;
-    }
-    const activeNow = tabs.find(t =>
-      t.getAttribute('aria-selected') === 'true' ||
-      t.classList.contains('active') ||
-      t.classList.contains('mdc-tab--active') ||
-      /active|selected/i.test(t.className)
-    ) || tabs[0];
-
-    // baseline before we start clicking
-    let prev = cleanText(findContentRoot().innerText);
-
-    for (const tab of tabs) {
-      if (isDead()) return out;
-      const label = tab.textContent.trim();
-      tab.click();
-      const changed = await waitForPanelChange(prev, 2500);
-      if (changed) prev = changed;
-      out.push({ label, content: prev });
-      log('scraped:', label, prev.length);
-    }
-    activeNow.click();
-    await sleep(200);
-    return out;
   }
 
   function findEditableFields() {
