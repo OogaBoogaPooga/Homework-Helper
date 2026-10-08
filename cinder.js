@@ -925,7 +925,7 @@ Only merge if two step labels are literally the same words.
 Every deliverable must reference the STUDENT'S project by name or a clear descriptor.
 If a step has sub-questions, answer each one inside that one deliverable, in order.
 Answer what the step asks. Don't restate it. Don't pad.
-100–250 words per deliverable.
+CRITICAL: Write the ACTUAL CONTENT, not a description of it. Never start a sentence with "In this section I...", "I list...", "I add...", "I note...", "I explain...", "I suggest..." — those are meta-commentary. If the step says "include X, Y, Z," just WRITE X, Y, Z as real sentences. The deliverable IS the content that goes in the field, not a summary of what will go in the field.
 
 === VOICE ===
 - 10th grade reading level. Plain words. Short sentences.
