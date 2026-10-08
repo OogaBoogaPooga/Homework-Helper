@@ -1,6 +1,6 @@
 // language: JavaScript, file: cinder.js, runtime: browser console on Buzz Angular
 // Homework Helper — core (auto-answer + chat + history + settings) + forge (classwork).
-// Groq backend. Loads as one file. Core runs first, forge waits for it.
+// Includes full kill switch. Groq backend. Loads as one file.
 
 // ============================================================
 // CORE
@@ -8,9 +8,20 @@
 (() => {
   'use strict';
 
+  // ---- kill-switch infrastructure ----
+  let KILLED = false;
+  const __timers = new Set();
+  const ABORT = new AbortController();
+  const SIG = { signal: ABORT.signal };
+
+  const setT = (fn, ms) => { const id = setTimeout(() => { __timers.delete(id); if (!KILLED) fn(); }, ms); __timers.add(id); return id; };
+  const clrAllT = () => { for (const id of __timers) { clearTimeout(id); clearInterval(id); } __timers.clear(); };
+
+  const killHooks = window.__helperKillHooks = window.__helperKillHooks || [];
+
   const CFG = {
     ai: {
-      key: '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',
+      key: 'PASTE_YOUR_GROQ_KEY_HERE',
       model: 'openai/gpt-oss-120b',
       url: 'https://api.groq.com/openai/v1/chat/completions',
       temperature: 0.2,
@@ -31,9 +42,14 @@
 
   const rand = (a, b) => Math.random() * (b - a) + a;
   const randInt = (a, b) => Math.floor(rand(a, b + 1));
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  const log = (...a) => console.log('%c[helper]', 'color:#e07b39;font-weight:bold', ...a);
+  const sleep = ms => new Promise((res) => {
+    if (KILLED) return res();
+    const id = setTimeout(() => { __timers.delete(id); res(); }, ms);
+    __timers.add(id);
+  });
+
+  const log = (...a) => { if (!KILLED) console.log('%c[helper]', 'color:#e07b39;font-weight:bold', ...a); };
 
   const S = {
     tab: 'auto', running: false, busy: false, processed: 0,
@@ -44,11 +60,11 @@
   };
 
   function ensureAudio() {
-    if (S.beep) return;
+    if (S.beep || KILLED) return;
     try {
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       S.beep = () => {
-        if (!CFG.sound) return;
+        if (!CFG.sound || KILLED) return;
         const o = ctx.createOscillator();
         const g = ctx.createGain();
         o.connect(g); g.connect(ctx.destination);
@@ -99,7 +115,7 @@
     return !!block.querySelector('input.mdc-checkbox__native-control');
   }
   function humanClick(el) {
-    if (!el) return;
+    if (!el || KILLED) return;
     const r = el.getBoundingClientRect();
     const cx = r.left + r.width / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
     const cy = r.top + r.height / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
@@ -118,6 +134,7 @@
 
   // ---- Groq ----
   async function groqChat(messages, opts = {}) {
+    if (KILLED) throw new Error('killed');
     const stream = !!opts.stream;
     const onDelta = opts.onDelta || (() => {});
     const body = {
@@ -129,8 +146,10 @@
     const res = await fetch(CFG.ai.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + CFG.ai.key },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: ABORT.signal
     });
+    if (KILLED) throw new Error('killed');
     if (!res.ok) {
       const t = await res.text();
       throw new Error('groq ' + res.status + ' ' + t.slice(0, 200));
@@ -138,6 +157,7 @@
     S.requests++;
     if (!stream) {
       const j = await res.json();
+      if (KILLED) throw new Error('killed');
       if (j.usage) {
         S.tokensIn += j.usage.prompt_tokens || 0;
         S.tokensOut += j.usage.completion_tokens || 0;
@@ -148,6 +168,7 @@
     const dec = new TextDecoder();
     let buf = '', full = '';
     while (true) {
+      if (KILLED) throw new Error('killed');
       const { done, value } = await reader.read();
       if (done) break;
       buf += dec.decode(value, { stream: true });
@@ -197,6 +218,7 @@ Reply with JSON only.`;
 
   // ---- auto loop ----
   async function processQuestion(block) {
+    if (KILLED) return false;
     const choices = getChoices(block);
     if (!choices.length) return true;
     const q = getQuestionText(block);
@@ -206,14 +228,17 @@ Reply with JSON only.`;
     S.currentChoices = choices.map(getChoiceText);
     render();
     await sleep(randInt(CFG.timing.minThinkMs, CFG.timing.maxThinkMs));
+    if (KILLED) return false;
 
     const prompt = buildAutoPrompt(q, choices, multi);
     let raw, parsed;
     try {
       raw = await groqChat([{ role: 'user', content: prompt }]);
+      if (KILLED) return false;
       parsed = parseAutoReply(raw, choices.length);
       if (!parsed.picks.length) throw new Error('no pick parsed: ' + String(raw).slice(0, 120));
     } catch (e) {
+      if (KILLED) return false;
       log('AI failed:', e.message);
       S.lastAnswer = 'AI error: ' + e.message;
       render();
@@ -226,8 +251,9 @@ Reply with JSON only.`;
     render();
 
     for (let p = 0; p < picked.length; p++) {
-      if (!S.running) return false;
+      if (!S.running || KILLED) return false;
       await sleep(randInt(CFG.timing.minMoveMs, CFG.timing.maxMoveMs));
+      if (KILLED) return false;
       if (!CFG.dryRun) humanClick(clickTargetFor(picked[p]));
       log(`picked: ${getChoiceText(picked[p]).slice(0, 60)}`);
       if (p < picked.length - 1) {
@@ -243,6 +269,7 @@ Reply with JSON only.`;
         ], { maxTokens: 80 })).trim();
       } catch {}
     }
+    if (KILLED) return false;
 
     S.history.push({
       ts: Date.now(), q: q.slice(0, 300),
@@ -267,40 +294,45 @@ Reply with JSON only.`;
     ) || null;
   }
   async function clickNext() {
+    if (KILLED) return null;
     const btn = findNextButton();
     if (!btn) return findReviewButton() ? 'review' : null;
     await sleep(randInt(CFG.timing.nextDelayMinMs, CFG.timing.nextDelayMaxMs));
+    if (KILLED) return null;
     if (!CFG.dryRun) humanClick(btn);
     log('→ next');
     return 'next';
   }
 
   async function loop() {
-    if (S.busy) return;
+    if (S.busy || KILLED) return;
     S.busy = true; S.running = true; render();
     log('auto loop started');
     let guard = 0;
-    while (S.running && guard++ < 500) {
+    while (S.running && !KILLED && guard++ < 500) {
       const blocks = getQuestionBlocks();
       if (!blocks.length) { log('no quiz questions left'); break; }
       for (const b of blocks) {
-        if (!S.running) break;
+        if (!S.running || KILLED) break;
         const ok = await processQuestion(b);
+        if (KILLED) break;
         if (!ok) { log('aborting after failure'); S.running = false; break; }
       }
-      if (!S.running) break;
+      if (!S.running || KILLED) break;
       const r = await clickNext();
+      if (KILLED) break;
       if (r !== 'next') { log('halt:', r || 'no next'); break; }
       await sleep(randInt(900, 2000));
     }
-    S.running = false; S.busy = false; render();
-    log('auto loop stopped');
+    S.running = false; S.busy = false;
+    if (!KILLED) { render(); log('auto loop stopped'); }
   }
 
   function stop() { S.running = false; render(); }
 
-  // ---- smart start: auto-route quiz vs forge ----
+  // ---- smart start ----
   function startSmart() {
+    if (KILLED) return;
     ensureAudio();
     if (S.running) { stop(); return; }
     const quizBlocks = getQuestionBlocks();
@@ -311,20 +343,19 @@ Reply with JSON only.`;
     }
     log('no quiz questions on this page — running Forge');
     if (window.__forge && typeof window.__forge.run === 'function') {
-      // switch to forge tab visually
-      const forgeTab = document.querySelector('#' + PID + ' .c-tab[data-tab="forge"]');
+      const forgeTab = document.querySelector('#' + PID + ' .h-tab[data-tab="forge"]');
       if (forgeTab) forgeTab.click();
       window.__forge.run();
     } else {
-      log('forge module not loaded — reload the page and try again');
-      S.lastAnswer = 'No quiz on this page, and Forge is not loaded. Paste the loader again.';
+      log('forge module not loaded yet — wait 2 seconds and try again');
+      S.lastAnswer = 'Forge not loaded. Wait 2s after pasting, then click Start.';
       render();
     }
   }
 
   // ---- chat ----
   async function sendChat(text) {
-    if (!text.trim()) return;
+    if (KILLED || !text.trim()) return;
     S.chat.push({ role: 'user', content: text });
     render();
     const id = 'msg-' + Date.now();
@@ -334,21 +365,24 @@ Reply with JSON only.`;
     try {
       await groqChat(
         [
-          { role: 'system', content: 'You are Homework Helper — direct, sharp, no filler. Answer the question actually asked. For test questions: give the answer and one short reason.' },
+          { role: 'system', content: 'You are Homework Helper — direct, sharp, no filler. Answer the question actually asked.' },
           ...S.chat.filter(m => !m.streaming).map(m => ({ role: m.role, content: m.content }))
         ],
         {
           stream: true, maxTokens: 800,
           onDelta: (d) => {
+            if (KILLED) return;
             const m = S.chat.find(x => x.id === id);
             if (m) { m.content += d; renderChat(); }
           }
         }
       );
     } catch (e) {
+      if (KILLED) return;
       const m = S.chat.find(x => x.id === id);
       if (m) m.content = 'Error: ' + e.message;
     }
+    if (KILLED) return;
     const m = S.chat.find(x => x.id === id);
     if (m) m.streaming = false;
     render();
@@ -365,7 +399,7 @@ Reply with JSON only.`;
       '    <span class="h-title">◆ Homework Helper</span>',
       '    <div class="h-hdr-btns">',
       '      <button class="h-icon" id="' + PID + '_min" title="Minimize">–</button>',
-      '      <button class="h-icon" id="' + PID + '_close" title="Close">×</button>',
+      '      <button class="h-icon h-kill-icon" id="' + PID + '_kill" title="Kill — stops everything and removes the script">⏻</button>',
       '    </div>',
       '  </div>',
       '  <div class="h-tabs" id="' + PID + '_tabs">',
@@ -378,6 +412,9 @@ Reply with JSON only.`;
       '    <div class="h-view" data-view="auto">',
       '      <div class="h-row">',
       '        <button class="h-btn h-btn-primary" id="' + PID + '_toggle">Start</button>',
+      '        <button class="h-btn h-btn-danger" id="' + PID + '_killBtn" title="Kill everything">Kill</button>',
+      '      </div>',
+      '      <div class="h-row">',
       '        <button class="h-btn h-btn-ghost" id="' + PID + '_skip">Skip Q</button>',
       '        <button class="h-btn h-btn-ghost" id="' + PID + '_explainNow">Explain</button>',
       '      </div>',
@@ -420,7 +457,7 @@ Reply with JSON only.`;
       '        <label class="h-check"><input type="checkbox" id="' + PID + '_sound"> Sound</label>',
       '        <label class="h-check"><input type="checkbox" id="' + PID + '_expl"> Explain</label>',
       '      </div>',
-      '      <div class="h-help">Hotkey: Ctrl+Shift+H toggles panel</div>',
+      '      <div class="h-help">Hotkeys — Ctrl+Shift+H toggle panel · Ctrl+Shift+K kill everything</div>',
       '    </div>',
       '  </div>',
       '  <div class="h-foot" id="' + PID + '_foot">',
@@ -457,6 +494,8 @@ Reply with JSON only.`;
       font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
     }
     #${PID} .h-icon:hover { background: rgba(0,0,0,.3); }
+    #${PID} .h-kill-icon { color: #7a0d0d; font-weight: 900; }
+    #${PID} .h-kill-icon:hover { background: #7a0d0d; color: #fff; }
 
     #${PID} .h-tabs {
       display: flex; background: #161616;
@@ -472,10 +511,7 @@ Reply with JSON only.`;
       transition: color .15s, background .15s, border-color .15s;
     }
     #${PID} .h-tab:hover { color: #d0d0d0; background: #1c1c1c; }
-    #${PID} .h-tab-active {
-      color: #e07b39; background: #1a1a1a;
-      border-bottom-color: #e07b39;
-    }
+    #${PID} .h-tab-active { color: #e07b39; background: #1a1a1a; border-bottom-color: #e07b39; }
 
     #${PID} .h-body { max-height: 480px; overflow-y: auto; padding: 12px 14px; }
     #${PID} .h-body::-webkit-scrollbar { width: 8px; }
@@ -490,6 +526,8 @@ Reply with JSON only.`;
     #${PID} .h-btn-primary { background: #2e7d32; color: #fff; }
     #${PID} .h-btn-primary:hover { filter: brightness(1.15); }
     #${PID} .h-btn-primary.h-stop { background: #c62828; }
+    #${PID} .h-btn-danger { background: #7a1f1f; color: #ffd6d6; border: 1px solid #a12828; }
+    #${PID} .h-btn-danger:hover { background: #a12828; color: #fff; }
     #${PID} .h-btn-ghost { background: #222; color: #ccc; }
     #${PID} .h-btn-ghost:hover { background: #2e2e2e; }
 
@@ -560,7 +598,7 @@ Reply with JSON only.`;
   `;
 
   function ensureUI() {
-    if (document.getElementById(ID)) return;
+    if (document.getElementById(ID) || KILLED) return;
     const style = document.createElement('style');
     style.id = ID + '_css';
     style.textContent = CSS;
@@ -578,6 +616,7 @@ Reply with JSON only.`;
   function wireUI() {
     document.querySelectorAll('#' + PID + ' .h-tab').forEach(btn => {
       btn.onclick = () => {
+        if (KILLED) return;
         S.tab = btn.dataset.tab;
         document.querySelectorAll('#' + PID + ' .h-tab').forEach(b => b.classList.toggle('h-tab-active', b === btn));
         document.querySelectorAll('#' + PID + ' .h-view').forEach(v => {
@@ -587,9 +626,10 @@ Reply with JSON only.`;
       };
     });
     $('_toggle').onclick = startSmart;
+    $('_killBtn').onclick = () => nuke('button');
     $('_skip').onclick = () => { const btn = findNextButton(); if (btn) { humanClick(btn); log('manual skip'); } };
     $('_explainNow').onclick = async () => {
-      if (!S.currentQ) { log('no current question'); return; }
+      if (KILLED || !S.currentQ) { log('no current question'); return; }
       S.tab = 'ask';
       document.querySelectorAll('#' + PID + ' .h-tab').forEach(b => b.classList.toggle('h-tab-active', b.dataset.tab === 'ask'));
       document.querySelectorAll('#' + PID + ' .h-view').forEach(v => { v.style.display = v.dataset.view === 'ask' ? '' : 'none'; });
@@ -600,10 +640,8 @@ Reply with JSON only.`;
       S.minimized = !S.minimized;
       document.getElementById(PID).classList.toggle('h-min', S.minimized);
     };
-    $('_close').onclick = () => {
-      document.getElementById(ID)?.remove();
-      document.getElementById(ID + '_css')?.remove();
-    };
+    $('_kill').onclick = () => nuke('header');
+
     const hdr = $('_hdr');
     const panel = document.getElementById(PID);
     let drag = null;
@@ -611,18 +649,19 @@ Reply with JSON only.`;
       if (e.target.classList.contains('h-icon')) return;
       drag = { x: e.clientX, y: e.clientY, l: panel.offsetLeft, t: panel.offsetTop };
       e.preventDefault();
-    });
+    }, SIG);
     document.addEventListener('mousemove', e => {
-      if (!drag) return;
+      if (!drag || KILLED) return;
       panel.style.left = (drag.l + e.clientX - drag.x) + 'px';
       panel.style.top = (drag.t + e.clientY - drag.y) + 'px';
       panel.style.right = 'auto';
-    });
-    document.addEventListener('mouseup', () => { drag = null; });
+    }, SIG);
+    document.addEventListener('mouseup', () => { drag = null; }, SIG);
+
     const ci = $('_chatInput');
     ci.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(ci.value); ci.value = ''; }
-    });
+    }, SIG);
     $('_chatSend').onclick = () => { sendChat(ci.value); ci.value = ''; };
     $('_export').onclick = () => {
       const blob = new Blob([JSON.stringify(S.history, null, 2)], { type: 'application/json' });
@@ -642,6 +681,42 @@ Reply with JSON only.`;
     const dk = $('_dry'); dk.checked = CFG.dryRun; dk.onchange = () => { CFG.dryRun = dk.checked; };
     const sk = $('_sound'); sk.checked = CFG.sound; sk.onchange = () => { CFG.sound = sk.checked; };
     const ek = $('_expl'); ek.checked = CFG.explain; ek.onchange = () => { CFG.explain = ek.checked; };
+
+    document.addEventListener('keydown', e => {
+      if (KILLED) return;
+      if (e.ctrlKey && e.shiftKey && (e.key === 'H' || e.key === 'h')) {
+        e.preventDefault();
+        const p = document.getElementById(PID);
+        if (!p) return;
+        p.style.display = p.style.display === 'none' ? '' : 'none';
+      }
+      if (e.ctrlKey && e.shiftKey && (e.key === 'K' || e.key === 'k')) {
+        e.preventDefault();
+        nuke('hotkey');
+      }
+    }, SIG);
+  }
+
+  // ---- FULL TEARDOWN ----
+  function nuke(reason) {
+    if (KILLED) return;
+    KILLED = true;
+    try { S.running = false; S.busy = false; } catch {}
+    try { ABORT.abort(); } catch {}
+    try { clrAllT(); } catch {}
+    try {
+      for (const hook of killHooks) { try { hook(); } catch {} }
+    } catch {}
+    try { window.__helperKillHooks = []; } catch {}
+    try { if (window.__helperForgeBoot) { clearInterval(window.__helperForgeBoot); window.__helperForgeBoot = null; } } catch {}
+    try { document.getElementById(ID + '_css')?.remove(); } catch {}
+    try { document.getElementById(ID)?.remove(); } catch {}
+    try { document.getElementById(PID)?.remove(); } catch {}
+    try { if (window.__forge) delete window.__forge; } catch {}
+    try { delete window.__cinder; } catch {}
+    console.log('%c[helper] KILLED — panel removed, timers cleared, listeners aborted, globals deleted. Paste the loader again to reload.', 'color:#e07b39;font-weight:bold');
+    // reason kept for debugging — uncomment if you want it logged
+    // console.log('kill reason:', reason);
   }
 
   function renderLog() {
@@ -677,7 +752,7 @@ Reply with JSON only.`;
     }).join('');
   }
   function render() {
-    if (!document.getElementById(PID)) return;
+    if (KILLED || !document.getElementById(PID)) return;
     const st = $('_status');
     if (st) {
       st.textContent = S.running ? 'running' : (S.busy ? 'stopping' : 'idle');
@@ -698,20 +773,11 @@ Reply with JSON only.`;
     return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
-  document.addEventListener('keydown', e => {
-    if (e.ctrlKey && e.shiftKey && (e.key === 'H' || e.key === 'h')) {
-      e.preventDefault();
-      const p = document.getElementById(PID);
-      if (!p) return;
-      p.style.display = p.style.display === 'none' ? '' : 'none';
-    }
-  });
-
   ensureUI();
   log('Homework Helper core ready');
   log('backend:', CFG.ai.model);
-  log('hotkey Ctrl+Shift+H toggles panel');
-  window.__cinder = { CFG, S, start: loop, stop, ask: sendChat, PID };
+  log('hotkeys — Ctrl+Shift+H toggle · Ctrl+Shift+K kill');
+  window.__cinder = { CFG, S, start: loop, stop, ask: sendChat, kill: nuke, PID, isKilled: () => KILLED };
   if (CFG.autoStart) loop();
 })();
 
@@ -722,8 +788,13 @@ Reply with JSON only.`;
   'use strict';
 
   const PID = '__helper_panel';
+  let FORGE_DEAD = false;
+  const isDead = () => FORGE_DEAD || !window.__cinder || window.__cinder.isKilled?.();
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const log = (...a) => console.log('%c[helper]', 'color:#e07b39;font-weight:bold', ...a);
+  const log = (...a) => { if (!isDead()) console.log('%c[helper]', 'color:#e07b39;font-weight:bold', ...a); };
+
+  // register kill hook so nuke() can freeze this module too
+  (window.__helperKillHooks = window.__helperKillHooks || []).push(() => { FORGE_DEAD = true; });
 
   const LS_KEY = '__helper_forge_ctx';
   const LS_HIST = '__helper_forge_hist';
@@ -771,9 +842,11 @@ Reply with JSON only.`;
       /active|selected/i.test(t.className)
     ) || tabs[0];
     for (const tab of tabs) {
+      if (isDead()) return out;
       const label = tab.textContent.trim();
       tab.click();
       await sleep(450);
+      if (isDead()) return out;
       out.push({ label, content: cleanText(findContentRoot().innerText) });
       log('scraped:', label, out[out.length - 1].content.length);
     }
@@ -833,6 +906,7 @@ Rules:
     return o;
   }
   async function groqJson(prompt, maxTokens) {
+    if (isDead()) throw new Error('killed');
     const CFG = window.__cinder.CFG;
     const res = await fetch(CFG.ai.url, {
       method: 'POST',
@@ -845,17 +919,19 @@ Rules:
         response_format: { type: 'json_object' }
       })
     });
+    if (isDead()) throw new Error('killed');
     if (!res.ok) throw new Error('groq ' + res.status + ' ' + (await res.text()).slice(0, 200));
     const j = await res.json();
     return j.choices?.[0]?.message?.content || '';
   }
 
   async function forge() {
-    if (F.running) return;
+    if (F.running || isDead()) return;
     F.running = true; renderForge();
     const t0 = Date.now();
     try {
       const steps = await scrapeAllSteps();
+      if (isDead()) return;
       F.scrapedSteps = steps;
       if (!steps.length || steps.every(s => s.content.length < 30)) {
         F.deliverables = [{ label: 'Error', answer: 'No assignment content detected on this page.' }];
@@ -865,6 +941,7 @@ Rules:
       const prompt = buildForgePrompt(steps, Ctx.project, fields);
       log('prompt', prompt.length, 'chars — calling', window.__cinder.CFG.ai.model);
       const raw = await groqJson(prompt);
+      if (isDead()) return;
       const parsed = parseForge(raw);
       F.title = parsed.assignment_title || document.title || 'Assignment';
       F.deliverables = parsed.deliverables;
@@ -873,14 +950,17 @@ Rules:
       try { localStorage.setItem(LS_HIST, JSON.stringify(F.history)); } catch {}
       log('forged', F.deliverables.length, 'in', ((Date.now() - t0) / 1000).toFixed(1) + 's');
     } catch (e) {
+      if (isDead() || e.message === 'killed') return;
       log('forge failed:', e.message);
       F.deliverables = [{ label: 'Error', answer: 'Forge failed: ' + e.message }];
     } finally {
-      F.running = false; renderForge();
+      F.running = false;
+      if (!isDead()) renderForge();
     }
   }
 
   function injectTab() {
+    if (isDead()) return;
     const tabsBar = document.querySelector('#' + PID + ' .h-tabs');
     if (!tabsBar || tabsBar.querySelector('[data-tab="forge"]')) return;
     const btn = document.createElement('button');
@@ -888,6 +968,7 @@ Rules:
     btn.dataset.tab = 'forge';
     btn.textContent = 'Forge';
     btn.onclick = () => {
+      if (isDead()) return;
       document.querySelectorAll('#' + PID + ' .h-tab').forEach(b => b.classList.toggle('h-tab-active', b === btn));
       document.querySelectorAll('#' + PID + ' .h-view').forEach(v => {
         v.style.display = v.dataset.view === 'forge' ? '' : 'none';
@@ -929,11 +1010,13 @@ Rules:
     document.getElementById(PID + '_forgeCopyAll').onclick = copyAll;
     document.getElementById(PID + '_forgeDl').onclick = downloadTxt;
     document.getElementById(PID + '_forgeClear').onclick = () => {
+      if (isDead()) return;
       F.deliverables = []; F.scrapedSteps = []; F.title = ''; renderForge();
     };
   }
 
   function renderForge() {
+    if (isDead()) return;
     const st = document.getElementById(PID + '_forgeStatus');
     if (!st) return;
     st.textContent = F.running
@@ -990,12 +1073,14 @@ Rules:
 
   function whenReady(fn, timeoutMs) {
     const start = Date.now();
-    const tick = setInterval(() => {
+    window.__helperForgeBoot = setInterval(() => {
+      if (isDead()) { clearInterval(window.__helperForgeBoot); window.__helperForgeBoot = null; return; }
       const coreReady = !!window.__cinder;
       const panelReady = !!document.querySelector('#' + PID + ' .h-tabs');
-      if (coreReady && panelReady) { clearInterval(tick); fn(); return; }
+      if (coreReady && panelReady) { clearInterval(window.__helperForgeBoot); window.__helperForgeBoot = null; fn(); return; }
       if (Date.now() - start > (timeoutMs || 15000)) {
-        clearInterval(tick);
+        clearInterval(window.__helperForgeBoot);
+        window.__helperForgeBoot = null;
         console.warn('[helper] forge timed out. core=', coreReady, 'panel=', panelReady);
       }
     }, 250);
