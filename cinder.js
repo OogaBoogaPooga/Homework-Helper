@@ -775,7 +775,7 @@ Start with the actual first sentence of content. End on the actual point.
 The label tells you where it goes. Do not write the label into the answer.
 Every deliverable references the student's project by actual name or clear descriptor.
 If a step has sub-questions, answer each inside that deliverable, in order.
-100–250 words per deliverable. Don't pad, don't repeat.
+60–120 words per deliverable. Shorter is better. Cut every sentence that doesn't add a fact, a reason, or an example. No padding, no restating, no transitions like "another key point" or "it's also worth noting". If a step can be answered in three tight sentences, do that.
 If the assignment step itself says "in this section include X, Y, Z" or "your introduction should explain X," that is NOT permission to describe the section. Write X, Y, Z and the explanation of X directly.
 Also ban reflective meta-tails at the end of a deliverable: "By stating these limits...", "Readers will see...", "This helps the project...", "This balance shows...". End on the actual point, not on a sentence describing the effect of the writing.
 
