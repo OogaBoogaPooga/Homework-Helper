@@ -1,5 +1,6 @@
-// language: JavaScript, file: homework-helper.js, runtime: browser console on Buzz Angular
-// Homework Helper — Auto (quiz/flashcards/lessons/fill) + Ask + Forge + History + Settings.
+// language: JavaScript, file: homework-helper.js, runtime: browser console
+// Homework Helper — Auto (universal MCQ/text) + Ask + Solve + History + Settings.
+// Supports Buzz, Canvas, Schoology, DeltaMath, IXL, Khan, Google Forms, and any site with generic radios/text inputs.
 // Groq backend. Simple UI. × fully tears down.
 
 // ============================================================
@@ -57,12 +58,32 @@
     tab: 'auto', running: false, busy: false, processed: 0,
     lastAnswer: '—', lastQuestion: '—',
     log: [], history: [], chat: [],
-    tokensIn: 0, tokensOut: 0, requests: 0
+    tokensIn: 0, tokensOut: 0, requests: 0,
+    platform: 'unknown'
   };
 
   const log = (...a) => { if (!KILLED) console.log('%c[hw-helper]', 'color:#e07b39;font-weight:bold', ...a); };
 
-  // ---- quiz DOM ----
+  // ============================================================
+  // PLATFORM DETECTION
+  // ============================================================
+  function detectPlatform() {
+    const host = location.hostname.toLowerCase();
+    const path = location.pathname.toLowerCase();
+    if (/agilixbuzz|buzz\.agilix/.test(host)) return 'buzz';
+    if (/instructure\.com/.test(host) && !/accounts/.test(path)) return 'canvas';
+    if (/schoology/.test(host)) return 'schoology';
+    if (/deltamath/.test(host)) return 'deltamath';
+    if (/ixl\.com/.test(host)) return 'ixl';
+    if (/khanacademy/.test(host)) return 'khan';
+    if (/docs\.google\.com/.test(host) && /\/forms/.test(path)) return 'gforms';
+    if (/quizizz|kahoot|quizlet/.test(host)) return 'quizapp';
+    return 'generic';
+  }
+
+  // ============================================================
+  // BUZZ DOM
+  // ============================================================
   const getQuestionBlocks = () => [...document.querySelectorAll('lib-question')].filter(b => b.offsetParent !== null);
   const getChoices = b => [...b.querySelectorAll('input.mdc-radio__native-control, input.mdc-checkbox__native-control')];
   const clickTargetFor = i => i.closest('label.mdc-form-field') || i.closest('label') || i.closest('mat-radio-button, mat-checkbox') || i;
@@ -90,25 +111,116 @@
   }
   const isMultiSelect = b => !!b.querySelector('input.mdc-checkbox__native-control');
 
-  function humanClick(el) {
-    if (!el || KILLED) return;
-    const r = el.getBoundingClientRect();
-    const cx = r.left + r.width / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
-    const cy = r.top + r.height / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
-    const o = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
-    el.dispatchEvent(new PointerEvent('pointerover', o));
-    el.dispatchEvent(new MouseEvent('mouseover', o));
-    el.dispatchEvent(new PointerEvent('pointermove', o));
-    el.dispatchEvent(new MouseEvent('mousemove', o));
-    el.dispatchEvent(new PointerEvent('pointerdown', o));
-    el.dispatchEvent(new MouseEvent('mousedown', o));
-    el.focus?.();
-    el.dispatchEvent(new PointerEvent('pointerup', o));
-    el.dispatchEvent(new MouseEvent('mouseup', o));
-    el.dispatchEvent(new MouseEvent('click', o));
+  // ============================================================
+  // GENERIC DOM HELPERS (universal)
+  // ============================================================
+  function isOurs(el) { return !!(el && el.closest && el.closest('#__hh_ui')); }
+
+  function visibleEls(sel, root = document) {
+    return [...root.querySelectorAll(sel)].filter(el => el.offsetParent !== null && !isOurs(el));
   }
 
-  // ---- anti-detection ----
+  function labelTextForInput(input) {
+    if (!input) return '';
+    // 1. for= attribute
+    const id = input.id;
+    if (id) {
+      const lab = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+      if (lab && lab.textContent.trim()) return lab.textContent.replace(/\s+/g, ' ').trim();
+    }
+    // 2. wrapping label
+    const wrapLab = input.closest('label');
+    if (wrapLab) {
+      const clone = wrapLab.cloneNode(true);
+      const inp = clone.querySelector('input, textarea, select');
+      if (inp) inp.remove();
+      const t = clone.textContent.replace(/\s+/g, ' ').trim();
+      if (t) return t;
+    }
+    // 3. aria-label / aria-labelledby
+    const al = input.getAttribute('aria-label');
+    if (al && al.trim()) return al.trim();
+    const alb = input.getAttribute('aria-labelledby');
+    if (alb) {
+      const t = alb.split(/\s+/).map(x => document.getElementById(x)?.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+      if (t) return t;
+    }
+    // 4. sibling / adjacent text
+    const sib = input.nextElementSibling;
+    if (sib && sib.textContent.trim().length > 0 && sib.textContent.length < 300) {
+      return sib.textContent.replace(/\s+/g, ' ').trim();
+    }
+    return '';
+  }
+
+  function questionTextForEl(el) {
+    if (!el) return '';
+    // walk up, look for a label, legend, heading, or question-classed container
+    let cur = el;
+    for (let i = 0; i < 8 && cur; i++) {
+      // check direct preceding siblings for question text
+      let sib = cur.previousElementSibling;
+      let hops = 0;
+      while (sib && hops < 3) {
+        const cls = (sib.className || '').toString().toLowerCase();
+        const tag = sib.tagName.toLowerCase();
+        const txt = (sib.textContent || '').replace(/\s+/g, ' ').trim();
+        if (txt && txt.length > 8 && txt.length < 800 && (
+          /question|prompt|stem|text|label|q-?text|problem|exercise/.test(cls) ||
+          ['p', 'legend', 'h1', 'h2', 'h3', 'h4'].includes(tag)
+        )) {
+          return txt;
+        }
+        sib = sib.previousElementSibling;
+        hops++;
+      }
+      // check for legends inside current
+      const legend = cur.querySelector('legend');
+      if (legend && legend.textContent.trim().length > 8) return legend.textContent.replace(/\s+/g, ' ').trim();
+      // next-ancestor
+      cur = cur.parentElement;
+      if (cur && cur.tagName === 'BODY') break;
+    }
+    // fallback: nearest form-group text
+    const group = el.closest('[class*="question"], [class*="prompt"], [class*="problem"], fieldset, form');
+    if (group) {
+      const t = (group.innerText || '').replace(/\s+/g, ' ').trim();
+      if (t.length > 8 && t.length < 1500) return t.slice(0, 600);
+    }
+    return '';
+  }
+
+  function fireInput(el, value) {
+    try {
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(el, value);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      if (el.isContentEditable) {
+        el.focus();
+        try { document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); } catch {}
+        fireKeystrokes(el, String(value).slice(0, 20));
+        document.execCommand('insertText', false, String(value));
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: String(value) }));
+        return true;
+      }
+    } catch (e) { log('fireInput failed:', e.message); }
+    return false;
+  }
+
+  function fireClick(el) {
+    if (!el) return;
+    try { el.click(); } catch {}
+    try { humanClick(el); } catch {}
+  }
+
+  // ============================================================
+  // ANTI-DETECTION
+  // ============================================================
   function driftMouse() {
     try {
       const x = randInt(20, window.innerWidth - 20);
@@ -152,7 +264,27 @@
     } catch {}
   }
 
-  // ---- groq ----
+  function humanClick(el) {
+    if (!el || KILLED) return;
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
+    const cy = r.top + r.height / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
+    const o = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
+    el.dispatchEvent(new PointerEvent('pointerover', o));
+    el.dispatchEvent(new MouseEvent('mouseover', o));
+    el.dispatchEvent(new PointerEvent('pointermove', o));
+    el.dispatchEvent(new MouseEvent('mousemove', o));
+    el.dispatchEvent(new PointerEvent('pointerdown', o));
+    el.dispatchEvent(new MouseEvent('mousedown', o));
+    el.focus?.();
+    el.dispatchEvent(new PointerEvent('pointerup', o));
+    el.dispatchEvent(new MouseEvent('mouseup', o));
+    el.dispatchEvent(new MouseEvent('click', o));
+  }
+
+  // ============================================================
+  // GROQ
+  // ============================================================
   async function groqCall(messages, opts = {}) {
     if (KILLED) throw new Error('killed');
     const stream = !!opts.stream;
@@ -244,7 +376,144 @@
     }
   }
 
-  // ---- auto MCQ ----
+  // ============================================================
+  // UNIVERSAL MCQ
+  // ============================================================
+  function collectGenericMCQs() {
+    const radios = visibleEls('input[type="radio"], input[type="checkbox"]');
+    const groups = {};
+    for (const r of radios) {
+      if (r.disabled) continue;
+      // skip if input is inside a Buzz lib-question (handled by buzz-specific path)
+      if (r.closest('lib-question')) continue;
+      const key = r.name || (r.getAttribute('data-group')) || (r.closest('fieldset') ? '__fs_' + (r.closest('fieldset').dataset.__hhId ||= Date.now() + '_' + Math.random()) : null) || '__single_' + (r.parentElement.dataset.__hhId ||= Date.now() + '_' + Math.random());
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(r);
+    }
+    return Object.entries(groups)
+      .filter(([_, g]) => g.length >= 2)
+      .map(([key, g]) => ({
+        key,
+        inputs: g,
+        choices: g.map(i => labelTextForInput(i)),
+        question: questionTextForEl(g[0]),
+        multi: g[0].type === 'checkbox'
+      }));
+  }
+
+  async function answerGenericMCQ(group) {
+    const choicesText = group.choices.map((c, i) => `${i + 1}. ${c}`).join('\n');
+    const prompt = `Answer this ${group.multi ? 'multiple-select' : 'multiple-choice'} question. Do not hedge.
+
+Question: ${group.question || '(no question text)'}
+
+Choices:
+${choicesText}
+
+Reply ONLY with JSON: {"picks":[${group.multi ? '1,3' : '2'}]}`;
+    let raw;
+    try {
+      raw = await groqCall([{ role: 'user', content: prompt }], { json: true, maxTokens: 200 });
+    } catch (e) {
+      log('generic MCQ failed:', e.message);
+      return false;
+    }
+    const m = String(raw).match(/\{[\s\S]*\}/);
+    if (!m) return false;
+    let parsed;
+    try { parsed = JSON.parse(m[0]); } catch { return false; }
+    const picks = (parsed.picks || []).map(Number).filter(n => n >= 1 && n <= group.inputs.length);
+    if (!picks.length) return false;
+
+    const pickedTexts = [];
+    for (const idx of picks) {
+      const input = group.inputs[idx - 1];
+      if (!input) continue;
+      const target = input.closest('label') || input.parentElement;
+      fireClick(target);
+      await sleep(randInt(200, 500));
+      pickedTexts.push(group.choices[idx - 1]);
+    }
+    S.lastAnswer = pickedTexts.join(' | ').slice(0, 120);
+    S.lastQuestion = (group.question || '').slice(0, 80);
+    S.history.push({ ts: Date.now(), q: (group.question || '').slice(0, 300), pickedText: pickedTexts, why: '' });
+    if (S.history.length > 200) S.history.shift();
+    S.processed++;
+    render();
+    return true;
+  }
+
+  // ============================================================
+  // UNIVERSAL TEXT INPUT
+  // ============================================================
+  function collectGenericTextInputs() {
+    const sel = 'textarea, input[type="text"], input[type="number"], input[type="email"], input:not([type]), [contenteditable="true"]';
+    const all = visibleEls(sel);
+    const out = [];
+    for (const el of all) {
+      if (el.disabled || el.readOnly) continue;
+      if (el.closest('lib-question')) continue;          // buzz path
+      if (el.closest('form[action*="search"], form[role="search"]')) continue;
+      if (el.type === 'hidden') continue;
+      // skip if value already present
+      const v = (el.value ?? el.innerText ?? '').trim();
+      if (v && v.length > 0 && !el.isContentEditable) continue;
+      // skip tiny inputs that look like search
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.width < 80) continue;
+      out.push(el);
+    }
+    return out;
+  }
+
+  async function answerGenericTextInput(el) {
+    const question = questionTextForEl(el);
+    if (!question) return false;
+    const placeholder = el.getAttribute('placeholder') || '';
+    const aria = el.getAttribute('aria-label') || '';
+    const prompt = `Answer this question with a short direct response. If it's numeric, reply with just the number.
+
+Question: ${question}
+${placeholder ? 'Hint: ' + placeholder : ''}
+${aria ? 'Label: ' + aria : ''}
+
+Reply with ONLY the answer text — nothing else. No "Answer:", no quotes.`;
+    let raw;
+    try {
+      raw = await groqCall([{ role: 'user', content: prompt }], { maxTokens: 300, temperature: 0.3 });
+    } catch (e) {
+      log('generic text failed:', e.message);
+      return false;
+    }
+    let answer = String(raw || '').trim().replace(/^["']|["']$/g, '');
+    if (!answer) return false;
+    const ok = fireInput(el, answer);
+    if (!ok) return false;
+    S.lastQuestion = question.slice(0, 80);
+    S.lastAnswer = answer.slice(0, 120);
+    S.processed++;
+    render();
+    return true;
+  }
+
+  // ============================================================
+  // UNIVERSAL ADVANCE
+  // ============================================================
+  function findGenericAdvance() {
+    const rx = /^(next|next question|continue|check|check answer|verify|submit|submit answer|submit quiz|finish|done|next page|→|›|>)$/i;
+    const els = visibleEls('button, a, [role="button"], input[type="submit"]');
+    for (const el of els) {
+      if (el.disabled) continue;
+      const t = (el.textContent || el.value || '').trim();
+      const a = (el.getAttribute('aria-label') || '').trim();
+      if (rx.test(t) || rx.test(a)) return el;
+    }
+    return null;
+  }
+
+  // ============================================================
+  // AUTO (Buzz-specific MCQ)
+  // ============================================================
   function buildAutoPrompt(question, choices, multi) {
     const list = choices.map((c, i) => `${i + 1}. ${getChoiceText(c)}`).join('\n');
     const inst = multi
@@ -334,6 +603,7 @@ Reply with JSON only.`;
     return 'next';
   }
 
+  // Buzz-specific loop
   async function loop() {
     if (S.busy || KILLED) return;
     if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') {
@@ -342,11 +612,11 @@ Reply with JSON only.`;
       else { log('no key — aborting'); return; }
     }
     S.busy = true; S.running = true; render();
-    log('auto loop started');
+    log('buzz quiz loop started');
     let guard = 0;
     while (S.running && !KILLED && guard++ < 500) {
       const blocks = getQuestionBlocks();
-      if (!blocks.length) { log('no quiz questions'); break; }
+      if (!blocks.length) { log('no buzz questions'); break; }
       for (const b of blocks) {
         if (!S.running || KILLED) break;
         const ok = await processQuestion(b);
@@ -360,11 +630,67 @@ Reply with JSON only.`;
       await sleep(randInt(900, 2000));
     }
     S.running = false; S.busy = false;
-    if (!KILLED) { render(); log('auto loop stopped'); }
+    if (!KILLED) { render(); log('buzz quiz loop stopped'); }
   }
+
+  // Universal loop
+  async function universalLoop() {
+    if (S.busy || KILLED) return;
+    if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') {
+      const k = prompt('Paste your Groq API key (starts with gsk_).');
+      if (k && k.trim()) { CFG.ai.key = k.trim(); saveCfg(); }
+      else return;
+    }
+    S.busy = true; S.running = true; render();
+    log('universal loop started on', S.platform);
+    let guard = 0;
+    while (S.running && !KILLED && guard++ < 200) {
+      const mcqs = collectGenericMCQs();
+      const texts = collectGenericTextInputs();
+      log('page scan —', mcqs.length, 'mcq groups,', texts.length, 'text inputs');
+
+      if (!mcqs.length && !texts.length) {
+        log('nothing to answer — trying advance');
+        const adv = findGenericAdvance();
+        if (adv) { humanClick(adv); await sleep(randInt(1800, 3200)); continue; }
+        log('universal: no more answers, no advance');
+        break;
+      }
+
+      for (const g of mcqs) {
+        if (!S.running || KILLED) break;
+        await sleep(randInt(CFG.timing.minThinkMs, CFG.timing.maxThinkMs));
+        await answerGenericMCQ(g);
+      }
+      for (const t of texts) {
+        if (!S.running || KILLED) break;
+        await sleep(randInt(CFG.timing.minThinkMs, CFG.timing.maxThinkMs));
+        await answerGenericTextInput(t);
+      }
+
+      if (!S.running || KILLED) break;
+      await sleep(randInt(900, 1800));
+
+      const adv = findGenericAdvance();
+      if (adv) {
+        log('advancing:', (adv.textContent || adv.value || '').trim().slice(0, 30));
+        await sleep(randInt(CFG.timing.nextDelayMinMs, CFG.timing.nextDelayMaxMs));
+        if (!CFG.dryRun) humanClick(adv);
+        await sleep(randInt(1400, 2600));
+      } else {
+        log('no advance button found — stopping');
+        break;
+      }
+    }
+    S.running = false; S.busy = false;
+    if (!KILLED) { render(); log('universal loop stopped'); }
+  }
+
   const stop = () => { S.running = false; render(); };
 
-  // ---- flashcard driver ----
+  // ============================================================
+  // FLASHCARD (Buzz)
+  // ============================================================
   function detectFlashcards() { return document.querySelector('lib-flash-cards-player'); }
   function getActiveFlashcard() { return document.querySelector('lib-flash-cards-player .card-ct.active .flashcard'); }
   function getFlashcardNext() { return document.querySelector('lib-flash-cards-player .stack-actions button[aria-label="Next"]'); }
@@ -379,12 +705,10 @@ Reply with JSON only.`;
     if (!detectFlashcards()) { log('no cards detected'); return; }
     S.running = true; S.busy = true; render();
     log('card driver started');
-
     const total = getStackIndex()?.total || 0;
     let lastIdx = getStackIndex()?.current || 0;
     let stuck = 0, clicks = 0;
     const MAX = 500;
-
     while (S.running && !KILLED && clicks < MAX) {
       if (isAssignmentComplete() || findCompletionIndicator()) { log('checkmark — stopping cards'); break; }
       const card = getActiveFlashcard();
@@ -406,41 +730,43 @@ Reply with JSON only.`;
       render();
       if (clicks % 5 === 0) log(`card ${nowIdx} of ${total}`);
     }
-
     S.running = false; S.busy = false;
     render();
     log(`card driver stopped after ${clicks} cards`);
-
     if (isAssignmentComplete() || findCompletionIndicator()) {
       await sleep(randInt(1500, 3200));
       const nav = findNextAssignmentNav();
       if (nav) { log('→ next assignment'); humanClick(nav); }
-      else { log('no next-assignment nav — advance manually'); }
     }
   }
 
-  // ---- classification + completion detection ----
+  // ============================================================
+  // CLASSIFICATION + COMPLETION
+  // ============================================================
   function classifyPage() {
-    if (getQuestionBlocks().length) return 'quiz';
-    if (detectFlashcards()) return 'cards';
-    if (findMarkCompleteButton()) return 'lesson';
+    // Buzz-specific signals first
+    if (getQuestionBlocks().length) return 'buzz-quiz';
+    if (detectFlashcards()) return 'buzz-cards';
+    if (findMarkCompleteButton()) return 'buzz-lesson';
 
-    const title = (
-      (document.title || '') + ' ' +
-      (document.querySelector('h1, [role="heading"], .assignment-title')?.textContent || '')
-    ).toLowerCase();
+    const title = ((document.title || '') + ' ' + (document.querySelector('h1, [role="heading"]')?.textContent || '')).toLowerCase();
     const bodyHead = (document.body.innerText || '').slice(0, 2500).toLowerCase();
 
+    // Universal: MCQ groups or text inputs on any site
+    const genericMCQs = collectGenericMCQs();
+    const genericTexts = collectGenericTextInputs();
+    if (genericMCQs.length >= 1 || genericTexts.length >= 2) return 'universal-quiz';
+
+    // Assignment signals
     if (/\b(assignment|submit|dropbox|rubric)\b/i.test(title)) return 'assignment';
     if (/\b(submit (your|this|the) assignment|dropbox|rubric|grading criteria)\b/i.test(bodyHead)) return 'assignment';
 
-    const inputs = [...document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"]')]
-      .filter(t => t.offsetParent !== null && !t.closest('#__hh_ui'));
+    const inputs = visibleEls('textarea, [contenteditable="true"], input[type="text"]');
     if (inputs.length) return 'assignment';
 
-    if (document.querySelector('video')) return 'lesson';
-    if (/\b(lesson|video|lecture|watch|reading)\b/i.test(title)) return 'lesson';
-    if (bodyHead.length > 700 && !inputs.length) return 'lesson';
+    if (document.querySelector('video')) return 'buzz-lesson';
+    if (/\b(lesson|video|lecture|watch|reading)\b/i.test(title)) return 'buzz-lesson';
+    if (bodyHead.length > 700 && !inputs.length) return 'buzz-lesson';
 
     return 'unknown';
   }
@@ -453,16 +779,9 @@ Reply with JSON only.`;
   function findCompletionIndicator() {
     const btns = [...document.querySelectorAll('button, [role="button"], mat-icon')]
       .filter(el => el.offsetParent !== null && inTopLeft(el));
-
     for (const b of btns) {
-      const blob = (
-        (b.className || '').toString() + ' ' +
-        (b.getAttribute('aria-label') || '') + ' ' +
-        (b.getAttribute('title') || '') + ' ' +
-        (b.textContent || '')
-      ).toLowerCase();
+      const blob = ((b.className || '').toString() + ' ' + (b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('title') || '') + ' ' + (b.textContent || '')).toLowerCase();
       if (/complete|done|check_circle|check\b/.test(blob) && !/close|cancel|error/.test(blob)) return b;
-
       const kids = b.querySelectorAll('*');
       for (const k of kids) {
         const r = k.getBoundingClientRect();
@@ -475,7 +794,6 @@ Reply with JSON only.`;
         const [_, r_, g_, b_] = m.map(Number);
         if (g_ > 120 && g_ > r_ + 30 && g_ > b_ + 30) return k;
       }
-
       const bg = getComputedStyle(b).backgroundColor || '';
       const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
       if (m) {
@@ -483,7 +801,6 @@ Reply with JSON only.`;
         if (g_ > 120 && g_ > r_ + 30 && g_ > b_ + 30) return b;
       }
     }
-
     for (const sel of ['[aria-label*="complete" i]', '[title*="complete" i]', '[class*="complete" i]']) {
       const el = [...document.querySelectorAll(sel)].find(e => e.offsetParent !== null && !/close|cancel/i.test(e.getAttribute('aria-label') || ''));
       if (el) return el;
@@ -493,11 +810,7 @@ Reply with JSON only.`;
 
   function findMarkCompleteButton() {
     return [...document.querySelectorAll('button, a, [role="button"]')]
-      .find(b =>
-        b.offsetParent !== null &&
-        !b.disabled &&
-        /^mark\s+(this\s+)?(activity|lesson|page|item)?\s*(as\s+)?complete$/i.test((b.textContent || '').trim())
-      ) || null;
+      .find(b => b.offsetParent !== null && !b.disabled && /^mark\s+(this\s+)?(activity|lesson|page|item)?\s*(as\s+)?complete$/i.test((b.textContent || '').trim())) || null;
   }
 
   function isAssignmentComplete() {
@@ -510,21 +823,13 @@ Reply with JSON only.`;
   }
 
   function findNextAssignmentNav() {
-    const sels = [
-      'button[aria-label*="next" i]',
-      'a[aria-label*="next" i]',
-      '[title*="next" i]',
-      '[aria-label*="forward" i]'
-    ];
+    const sels = ['button[aria-label*="next" i]', 'a[aria-label*="next" i]', '[title*="next" i]', '[aria-label*="forward" i]'];
     for (const sel of sels) {
       const el = [...document.querySelectorAll(sel)].find(e => e.offsetParent !== null);
       if (el && !/previous|back|left/i.test((el.getAttribute('aria-label') || el.getAttribute('title') || ''))) return el;
     }
     const icons = [...document.querySelectorAll('mat-icon, i, span')].filter(e =>
-      e.children.length === 0 &&
-      e.offsetParent !== null &&
-      /^chevron_right$/.test((e.textContent || '').trim())
-    );
+      e.children.length === 0 && e.offsetParent !== null && /^chevron_right$/.test((e.textContent || '').trim()));
     if (icons.length) return icons[0].closest('button, a') || icons[0];
     return null;
   }
@@ -535,20 +840,14 @@ Reply with JSON only.`;
       const done = el => { if (!resolved) { resolved = true; resolve(el); } };
       const probe = () => { const el = findCompletionIndicator(); if (el) done(el); };
       probe();
-
       const mo = new MutationObserver(probe);
-      mo.observe(document.body, {
-        childList: true, subtree: true,
-        attributes: true,
-        attributeFilter: ['class', 'aria-label', 'title', 'style']
-      });
-
+      mo.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'aria-label', 'title', 'style'] });
       const iv = setInterval(probe, 2000);
       killHooks.push(() => { mo.disconnect(); clearInterval(iv); });
     });
   }
 
-  // ---- lesson chain ----
+  // ---- lesson chain (Buzz) ----
   function looksLikeQuestions(text) {
     if (!text) return false;
     const q = (text.match(/\?/g) || []).length;
@@ -560,9 +859,7 @@ Reply with JSON only.`;
     if (!body || body.length < 40) return;
     const title = document.title || 'Lesson';
     try {
-      localStorage.setItem('__hh_pending_lesson', JSON.stringify({
-        title, text: body.slice(0, 3000), ts: Date.now()
-      }));
+      localStorage.setItem('__hh_pending_lesson', JSON.stringify({ title, text: body.slice(0, 3000), ts: Date.now() }));
       log('stashed lesson context:', title);
     } catch {}
   }
@@ -616,34 +913,27 @@ Reply with JSON only.`;
   async function runLessonChain() {
     S.running = true; S.busy = true; render();
     log('lesson chain started');
-
     const startedAt = Date.now();
     let advanced = 0;
-
     while (S.running && !KILLED) {
       if (Date.now() - startedAt > 2 * 60 * 60 * 1000) { log('chain timeout (2h)'); break; }
-
       const kind = classifyPage();
       S.lastAnswer = `page: ${kind} · advanced ${advanced}`;
       render();
       log('page:', kind);
 
-      if (kind === 'quiz') { log('hit quiz — stopping chain. Click Start.'); break; }
-      if (kind === 'cards') { log('hit flashcards — stopping chain. Click Start.'); break; }
+      if (kind === 'buzz-quiz') { log('hit buzz quiz — stopping chain.'); break; }
+      if (kind === 'buzz-cards') { log('hit flashcards — stopping chain.'); break; }
+      if (kind === 'universal-quiz') { log('hit universal quiz — running universal loop'); await universalLoop(); return; }
       if (kind === 'assignment') {
-        if (hasPendingLesson() && !needsFileUpload()) {
-          log('hit fillable assignment — running Fill mode');
-          await runFillAssignment();
-          return;
-        }
-        log('hit assignment — stopping chain. Run Forge.');
+        if (hasPendingLesson() && !needsFileUpload()) { log('hit fillable assignment — Fill mode'); await runFillAssignment(); return; }
+        log('hit assignment — stopping chain. Run Solve.');
         break;
       }
       if (kind === 'unknown') { log('unknown page — stopping chain'); break; }
 
       await handlePassiveLesson();
       if (!S.running || KILLED) break;
-
       const nav = findNextAssignmentNav();
       if (!nav) { log('no next-lesson nav — chain stopped'); break; }
       humanClick(nav);
@@ -651,14 +941,13 @@ Reply with JSON only.`;
       log(`→ advanced to lesson ${advanced + 1}`);
       await sleep(randInt(2200, 4200));
     }
-
     S.running = false; S.busy = false;
     render();
     log(`chain stopped after ${advanced} advances`);
   }
 
   // ============================================================
-  // FILL MODE
+  // FILL MODE (Buzz)
   // ============================================================
   function hasPendingLesson() {
     try {
@@ -668,7 +957,6 @@ Reply with JSON only.`;
       return p && p.ts && (Date.now() - p.ts) < 60 * 60 * 1000;
     } catch { return false; }
   }
-
   function getPendingLesson() {
     try {
       const raw = localStorage.getItem('__hh_pending_lesson');
@@ -678,7 +966,6 @@ Reply with JSON only.`;
       return p;
     } catch { return null; }
   }
-
   function needsFileUpload() {
     const text = (document.body.innerText || '').toLowerCase();
     if (/\b(upload (a )?file|attach (a )?file|turn in as (a )?file|submit as (a )?file|file upload)\b/.test(text)) return true;
@@ -686,109 +973,42 @@ Reply with JSON only.`;
     return !!fi;
   }
 
-  function findSubmissionBox() {
-    const isOurs = el => !!el.closest('#__hh_ui');
-    const cands = [...document.querySelectorAll('textarea, [contenteditable="true"]')]
-      .filter(el => el.offsetParent !== null && !isOurs(el));
-    return cands[0] || null;
-  }
-
-  function findSubmitButton() {
-    const rx = /^(submit|turn in|turn this in|turn it in|submit assignment|submit for grading|submit your work|save and submit|save & submit|finish|finish assignment|complete|mark complete|submit and close|hand in|hand it in)\b/i;
-
-    const els = [...document.querySelectorAll(
-      'button, a, [role="button"], .mdc-button, [mat-flat-button], [mat-raised-button], [mat-stroked-button]'
-    )];
-
-    for (const el of els) {
-      if (el.offsetParent === null) continue;
-      if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
-      if (el.closest('#__hh_ui')) continue;
-      const txt = (el.textContent || '').trim();
-      if (rx.test(txt)) return el;
-    }
-
-    for (const el of els) {
-      if (el.offsetParent === null) continue;
-      if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
-      if (el.closest('#__hh_ui')) continue;
-      const lbl = (el.getAttribute('aria-label') || '').trim();
-      if (rx.test(lbl)) return el;
-    }
-
-    const section = [...document.querySelectorAll('section, div, mat-card')]
-      .find(el =>
-        el.offsetParent !== null &&
-        /(submission|turn\s*in|submit|dropbox)/i.test((el.textContent || '').slice(0, 300))
-      );
-    if (section) {
-      const btn = section.querySelector('button:not([disabled]), [role="button"]:not([disabled])');
-      if (btn && !btn.closest('#__hh_ui')) return btn;
-    }
-
-    return null;
-  }
-
   async function openSubmissionBox() {
-    const isOurs = el => !!el.closest('#__hh_ui');
-
-    const scan = () => [...document.querySelectorAll('textarea, [contenteditable="true"]')]
-      .filter(el => el.offsetParent !== null && !isOurs(el))
-      .find(el => {
-        const r = el.getBoundingClientRect();
-        return r.width > 100 && r.height > 20;
-      }) || null;
+    const scan = () => visibleEls('textarea, [contenteditable="true"]')
+      .find(el => { const r = el.getBoundingClientRect(); return r.width > 100 && r.height > 20; }) || null;
 
     let box = scan();
     if (box) { log('comment box already visible'); return box; }
 
-    const tryEls = [
-      ...document.querySelectorAll('button, [role="button"], mat-icon, .material-icons, span'),
-    ].filter(el => {
-      if (el.offsetParent === null) return false;
-      if (el.closest('#__hh_ui')) return false;
+    const tryEls = visibleEls('button, [role="button"], mat-icon, .material-icons, span').filter(el => {
       const t = (el.textContent || '').trim();
       const lbl = (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '');
-      return /^\+$/.test(t)
-          || /^add$/i.test(t)
-          || /add comment|add reply|add note|add response|write a comment|new comment|post comment/i.test(lbl)
-          || /add comment|add reply|add note|start (writing|typing)/i.test(t);
+      return /^\+$/.test(t) || /^add$/i.test(t)
+        || /add comment|add reply|add note|add response|write a comment|new comment|post comment/i.test(lbl)
+        || /add comment|add reply|add note|start (writing|typing)/i.test(t);
     });
-
-    log('trying', tryEls.length, 'potential openers');
 
     for (const el of tryEls) {
       if (KILLED) return null;
-      log('clicking opener:', (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40));
       humanClick(el);
       await sleep(1200);
       box = scan();
-      if (box) { log('box appeared after click'); return box; }
+      if (box) return box;
     }
 
-    const commentLabel = [...document.querySelectorAll('*')]
-      .find(el => el.children.length === 0 && el.offsetParent !== null && /^comments?$/i.test((el.textContent || '').trim()));
+    const commentLabel = [...document.querySelectorAll('*')].find(el =>
+      el.children.length === 0 && el.offsetParent !== null && /^comments?$/i.test((el.textContent || '').trim()));
     if (commentLabel) {
-      log('clicking Comments label');
       humanClick(commentLabel);
       await sleep(1200);
       box = scan();
       if (box) return box;
-
       const container = commentLabel.closest('section, div, mat-card');
       if (container) {
         const btn = container.querySelector('button, [role="button"], mat-icon, .material-icons');
-        if (btn) {
-          log('clicking inside Comments section');
-          humanClick(btn);
-          await sleep(1200);
-          box = scan();
-          if (box) return box;
-        }
+        if (btn) { humanClick(btn); await sleep(1200); box = scan(); if (box) return box; }
       }
     }
-
-    log('could not open comment box');
     return null;
   }
 
@@ -804,17 +1024,12 @@ Reply with JSON only.`;
         return true;
       }
       box.focus();
-      try {
-        document.execCommand('selectAll', false, null);
-        document.execCommand('delete', false, null);
-      } catch {}
+      try { document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); } catch {}
       fireKeystrokes(box, text.slice(0, 40));
       await sleep(randInt(180, 520));
       const ok = document.execCommand('insertText', false, text);
       if (!ok) box.innerText = text;
-      box.dispatchEvent(new InputEvent('input', {
-        bubbles: true, cancelable: true, inputType: 'insertText', data: text
-      }));
+      box.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
       box.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     } catch (e) {
@@ -826,45 +1041,23 @@ Reply with JSON only.`;
   // ---- length parsing ----
   function parseLengthRequirement(text) {
     const t = (text || '').toLowerCase();
-
-    let m = t.match(/at\s+least\s+(\d+)\s+words?/);
-    if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
-
-    m = t.match(/minimum\s+(?:of\s+)?(\d+)\s+words?/);
-    if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
-
-    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+words?/);
-    if (m) return { kind: 'words', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
-
-    m = t.match(/no\s+more\s+than\s+(\d+)\s+words?/);
-    if (m) return { kind: 'words', min: null, max: parseInt(m[1], 10), raw: m[0] };
-
-    m = t.match(/(\d+)\s+words?\s*(?:each|per|minimum|max|maximum)/);
-    if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
-
-    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+sentences?/);
-    if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
-
-    m = t.match(/at\s+least\s+(\d+)\s+sentences?/);
-    if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: null, raw: m[0] };
-
-    m = t.match(/(\d+)\s+sentences?\s*(?:each|per|minimum)/);
-    if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: null, raw: m[0] };
-
-    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+paragraphs?/);
-    if (m) return { kind: 'paragraphs', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
-
-    m = t.match(/(\d+)\s+paragraphs?/);
-    if (m) return { kind: 'paragraphs', min: parseInt(m[1], 10), max: parseInt(m[1], 10), raw: m[0] };
-
+    let m = t.match(/at\s+least\s+(\d+)\s+words?/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
+    m = t.match(/minimum\s+(?:of\s+)?(\d+)\s+words?/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
+    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+words?/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
+    m = t.match(/no\s+more\s+than\s+(\d+)\s+words?/); if (m) return { kind: 'words', min: null, max: parseInt(m[1], 10), raw: m[0] };
+    m = t.match(/(\d+)\s+words?\s*(?:each|per|minimum|max|maximum)/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
+    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+sentences?/); if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
+    m = t.match(/at\s+least\s+(\d+)\s+sentences?/); if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: null, raw: m[0] };
+    m = t.match(/(\d+)\s+sentences?\s*(?:each|per|minimum)/); if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: null, raw: m[0] };
+    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+paragraphs?/); if (m) return { kind: 'paragraphs', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
+    m = t.match(/(\d+)\s+paragraphs?/); if (m) return { kind: 'paragraphs', min: parseInt(m[1], 10), max: parseInt(m[1], 10), raw: m[0] };
     return null;
   }
-
   function describeLength(req) {
     if (!req) return '';
     if (req.kind === 'words') {
-      if (req.min && req.max) return `Each answer must be between ${req.min} and ${req.max} words. Aim for ${Math.round((req.min + req.max) / 2)} words.`;
-      if (req.min) return `Each answer must be AT LEAST ${req.min} words. Do not go under this.`;
+      if (req.min && req.max) return `Each answer must be between ${req.min} and ${req.max} words.`;
+      if (req.min) return `Each answer must be AT LEAST ${req.min} words.`;
       if (req.max) return `Each answer must be under ${req.max} words.`;
     }
     if (req.kind === 'sentences') {
@@ -880,13 +1073,10 @@ Reply with JSON only.`;
 
   async function generateAnswersForLesson(lesson, submissionText) {
     const lengthReq = parseLengthRequirement(lesson.text + '\n' + (submissionText || ''));
-    const lengthLine = describeLength(lengthReq) || 'Match the length to what the question actually asks. See the LENGTH MATCHING rules below.';
+    const lengthLine = describeLength(lengthReq) || 'Match the length to what the question actually asks.';
     if (lengthReq) log('detected length requirement:', lengthReq.raw);
 
     const makePrompt = (sourceText, short) => `You are a real 11th grade student answering reflection questions for a class assignment. You write like a normal high schooler — not an adult, not a chatbot, not a resume.
-
-LENGTH (hard rule):
-${lengthLine}
 
 VOICE:
 - Plain words. Short sentences. No semicolons. No markdown. No bullet lists.
@@ -894,34 +1084,26 @@ VOICE:
 - Say "it", "my project", "I". Never "the system" or "the AI application."
 - Answer the actual question. Don't restate it.
 
-REAL EXAMPLES ONLY — this is the most important rule:
-- If the question asks for personal examples, use things a real high schooler actually touches every day. Spotify playlists. YouTube. TikTok. Instagram. Google Docs. Notes app. Phone camera roll. School email. A school Chromebook. A shared Google Slides deck for a group project. Classroom assignments. Discord. A school spreadsheet for a science lab.
-- NEVER invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built, professional projects, or anything that sounds like an adult at a tech company. A high schooler doesn't have those.
-- Do NOT stack 5-6 examples just to fill space. 2-3 short ones is enough. Then answer the question.
-- If you're unsure whether an example is real, use a more generic one ("a playlist app", "a school spreadsheet", "my camera roll") rather than something specific and made up.
-
-TONE:
-- Write like you're explaining this to a friend, not writing a report for a business.
-- No filler phrases: "It's important to note", "plays a crucial role", "leverages", "facilitates".
-- No "In conclusion" or "In summary."
+REAL EXAMPLES ONLY:
+- If the question asks for personal examples, use things a real high schooler actually touches every day. Spotify playlists. YouTube. TikTok. Instagram. Google Docs. Notes app. Phone camera roll. School email. A school Chromebook. Shared Google Slides. Discord.
+- NEVER invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built, or anything that sounds like an adult at a tech company.
+- 2-3 short examples max. Don't stack to fill space.
 
 FORMAT:
 - Write one answer per question, in order, separated by blank lines.
 - No headers, no labels, no "Question 1:", no "Answer:".
-- Just the answers.
 
-LENGTH MATCHING (read the question, pick the tier):
-- If a word/sentence/paragraph count is stated → follow it exactly. Overrides everything below.
-- Simple reflection, opinion, "what did you do," list-style, "name an example" → 2-3 sentences.
-- "Explain," "describe," "summarize," "what is X" → 3-5 sentences. One short paragraph.
-- "Analyze," "compare," "discuss why," "evaluate," "what would happen if," multi-part with 2+ sub-questions → 5-8 sentences. Still tight, still one paragraph, but more substance.
-- "Write an essay," "long-form response," "3 paragraphs" → honor the size the assignment implies.
+LENGTH MATCHING:
+- If a word/sentence/paragraph count is stated → follow it exactly.
+- Simple reflection, opinion, list, "name an example" → 2-3 sentences.
+- "Explain," "describe," "summarize," "what is X" → 3-5 sentences.
+- "Analyze," "compare," "discuss why," "evaluate," multi-part → 5-8 sentences.
 
-BANNED REGARDLESS OF TIER:
-- "For example, ..." as a padding sentence
-- Closing wrap-ups ("In the end, ...", "Overall, ...", "This shows that, ...")
+BANNED:
+- "For example, ..." as padding
+- Closing wrap-ups ("In the end, ...", "Overall, ...")
 - Restating the question
-- Adding a 4th sub-point when the question asked for 2
+- Extra sub-points beyond what was asked
 
 SOURCE QUESTIONS:
 """
@@ -929,53 +1111,37 @@ ${lesson.title}
 ${sourceText}
 """
 ${submissionText && !short ? `\nASSIGNMENT CONTEXT:\n"""\n${submissionText.slice(0, 800)}\n"""\n` : ''}
-Return plain text only — just the answers, separated by blank lines.`;
+Return plain text only — answers separated by blank lines.`;
 
     const tryOnce = async (source, short, temp, tokens) => {
       try {
-        const raw = await groqCall(
-          [{ role: 'user', content: makePrompt(source, short) }],
-          { maxTokens: tokens, temperature: temp }
-        );
+        const raw = await groqCall([{ role: 'user', content: makePrompt(source, short) }], { maxTokens: tokens, temperature: temp });
         return (raw || '').trim();
-      } catch (e) {
-        log('fill attempt failed:', e.message);
-        return '';
-      }
+      } catch (e) { log('fill attempt failed:', e.message); return ''; }
     };
 
     let raw = await tryOnce(lesson.text.slice(0, 2800), false, 0.4, 6000);
     if (raw) return raw;
-
-    log('attempt 1 empty — retrying with shorter context');
+    log('attempt 1 empty — shorter context');
     raw = await tryOnce(lesson.text.slice(0, 1400), true, 0.3, 6000);
     if (raw) return raw;
-
-    log('attempt 2 empty — trying minimal prompt');
-    const minimal = `Write a student reflection answering the questions below. ${lengthLine} Plain first-person prose, no headers, one answer per question separated by blank lines. Use examples a real 11th grader would have — apps, school stuff, phone stuff. Nothing corporate.
+    log('attempt 2 empty — minimal prompt');
+    const minimal = `Write a student reflection answering the questions below. Plain first-person prose, one answer per question separated by blank lines. Use examples a real 11th grader would have.
 
 Questions:
 ${lesson.text.slice(0, 1200)}
 
 Answers:`;
-    try {
-      raw = await groqCall([{ role: 'user', content: minimal }], { maxTokens: 6000, temperature: 0.5 });
-      raw = (raw || '').trim();
-    } catch (e) { log('attempt 3 failed:', e.message); }
+    try { raw = await groqCall([{ role: 'user', content: minimal }], { maxTokens: 6000, temperature: 0.5 }); raw = (raw || '').trim(); } catch (e) { log('attempt 3 failed:', e.message); }
     if (raw) return raw;
-
     if (CFG.ai.model !== 'llama-3.3-70b-versatile') {
-      log('all attempts empty — trying llama-3.3-70b-versatile');
+      log('trying llama-3.3-70b-versatile');
       const prev = CFG.ai.model;
       CFG.ai.model = 'llama-3.3-70b-versatile';
-      try {
-        raw = await groqCall([{ role: 'user', content: minimal }], { maxTokens: 6000, temperature: 0.4 });
-        raw = (raw || '').trim();
-      } catch (e) { log('llama fallback failed:', e.message); }
+      try { raw = await groqCall([{ role: 'user', content: minimal }], { maxTokens: 6000, temperature: 0.4 }); raw = (raw || '').trim(); } catch (e) { log('llama failed:', e.message); }
       if (raw) return raw;
       CFG.ai.model = prev;
     }
-
     return '';
   }
 
@@ -983,219 +1149,110 @@ Answers:`;
     return new Promise(resolve => {
       const el = document.createElement('div');
       el.id = '__hh_fill_popup';
-      el.style.cssText = `
-        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-        z-index: 2147483647; width: min(720px, 92vw);
-        background: #1a1a1a; color: #f0f0f0;
-        border: 2px solid #e07b39; border-radius: 12px;
-        font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        box-shadow: 0 12px 60px rgba(0,0,0,.8);
-        overflow: hidden;
-      `;
-      const wordCount = (answers.match(/\S+/g) || []).length;
+      el.style.cssText = `position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;width:min(720px,92vw);background:#1a1a1a;color:#f0f0f0;border:2px solid #e07b39;border-radius:12px;font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;box-shadow:0 12px 60px rgba(0,0,0,.8);overflow:hidden;`;
+      const wc = (answers.match(/\S+/g) || []).length;
       const autoSubmit = CFG.autoSubmitSec > 0;
       el.innerHTML = `
         <div style="background:#e07b39;color:#1a1a1a;padding:10px 16px;font-weight:700;display:flex;justify-content:space-between;align-items:center;">
           <span>Review before submit</span>
-          <span id="__hh_fill_x" style="cursor:pointer;font-size:20px;line-height:1;">×</span>
+          <span id="__hh_fill_x" style="cursor:pointer;font-size:20px;">×</span>
         </div>
         <div style="padding:14px 16px;max-height:60vh;overflow-y:auto;">
-          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:700;">Source questions</div>
-          <div style="background:#0e0e0e;border-radius:6px;padding:10px;font-size:12px;color:#bbb;white-space:pre-wrap;max-height:140px;overflow-y:auto;margin-bottom:14px;">${(lesson.title + '\n\n' + lesson.text.slice(0, 1000)).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>
-          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:700;">Generated answers (${wordCount} words) ${boxFound ? '· pasted into box' : '· box not found'}</div>
-          <div style="background:#0e0e0e;border-left:3px solid #e07b39;border-radius:6px;padding:10px;font-size:13px;color:#eee;white-space:pre-wrap;max-height:260px;overflow-y:auto;">${answers.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>
-          <div style="margin-top:12px;font-size:11px;color:#888;" id="__hh_fill_hint">
-            ${autoSubmit ? `Auto-submitting in <b id="__hh_fill_count">${CFG.autoSubmitSec}</b>s — click Confirm to submit now, or Cancel to stop.` : 'Confirm to paste (if needed) and click Submit / Turn in. Cancel to stop.'}
-          </div>
+          <div style="font-size:11px;color:#888;margin-bottom:6px;font-weight:700;">SOURCE QUESTIONS</div>
+          <div style="background:#0e0e0e;border-radius:6px;padding:10px;font-size:12px;color:#bbb;white-space:pre-wrap;max-height:140px;overflow-y:auto;margin-bottom:14px;">${(lesson.title + '\n\n' + lesson.text.slice(0,1000)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</div>
+          <div style="font-size:11px;color:#888;margin-bottom:6px;font-weight:700;">GENERATED (${wc} words) ${boxFound ? '· pasted into box' : '· box not found'}</div>
+          <div style="background:#0e0e0e;border-left:3px solid #e07b39;border-radius:6px;padding:10px;font-size:13px;color:#eee;white-space:pre-wrap;max-height:260px;overflow-y:auto;">${answers.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}</div>
+          <div style="margin-top:12px;font-size:11px;color:#888;">${autoSubmit ? `Auto-submit in <b id="__hh_fill_count">${CFG.autoSubmitSec}</b>s` : 'Confirm to submit. Cancel to stop.'}</div>
         </div>
         <div style="padding:12px 16px;background:#141414;border-top:1px solid #262626;display:flex;gap:8px;">
           <button id="__hh_fill_confirm" style="flex:1;padding:10px;border:0;border-radius:8px;background:#2e7d32;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">Confirm & Submit</button>
-          <button id="__hh_fill_manual" style="flex:0 0 auto;padding:10px 16px;border:0;border-radius:8px;background:#333;color:#ddd;font-weight:600;font-size:13px;cursor:pointer;">Copy Only</button>
-          <button id="__hh_fill_cancel" style="flex:0 0 auto;padding:10px 16px;border:0;border-radius:8px;background:#5a1e1e;color:#ffd6d6;font-weight:600;font-size:13px;cursor:pointer;">Cancel</button>
-        </div>
-      `;
+          <button id="__hh_fill_manual" style="padding:10px 16px;border:0;border-radius:8px;background:#333;color:#ddd;font-weight:600;font-size:13px;cursor:pointer;">Copy</button>
+          <button id="__hh_fill_cancel" style="padding:10px 16px;border:0;border-radius:8px;background:#5a1e1e;color:#ffd6d6;font-weight:600;font-size:13px;cursor:pointer;">Cancel</button>
+        </div>`;
       document.body.appendChild(el);
-
-      let resolved = false;
-      let autoIv = null;
-      const cleanup = (result) => {
-        if (resolved) return;
-        resolved = true;
-        if (autoIv) clearInterval(autoIv);
-        try { el.remove(); } catch {}
-        resolve(result);
-      };
-
+      let resolved = false; let autoIv = null;
+      const cleanup = r => { if (resolved) return; resolved = true; if (autoIv) clearInterval(autoIv); try { el.remove(); } catch {} resolve(r); };
       document.getElementById('__hh_fill_x').onclick = () => cleanup('cancel');
       document.getElementById('__hh_fill_cancel').onclick = () => cleanup('cancel');
-      document.getElementById('__hh_fill_manual').onclick = () => {
-        try { navigator.clipboard.writeText(answers); } catch {}
-        cleanup('manual');
-      };
+      document.getElementById('__hh_fill_manual').onclick = () => { try { navigator.clipboard.writeText(answers); } catch {} cleanup('manual'); };
       document.getElementById('__hh_fill_confirm').onclick = () => cleanup('confirm');
-
       if (autoSubmit) {
         let left = CFG.autoSubmitSec;
-        const countEl = document.getElementById('__hh_fill_count');
-        autoIv = setInterval(() => {
-          left--;
-          if (countEl) countEl.textContent = String(Math.max(left, 0));
-          if (left <= 0) { clearInterval(autoIv); autoIv = null; cleanup('confirm'); }
-        }, 1000);
+        const cEl = document.getElementById('__hh_fill_count');
+        autoIv = setInterval(() => { left--; if (cEl) cEl.textContent = String(Math.max(left, 0)); if (left <= 0) { clearInterval(autoIv); autoIv = null; cleanup('confirm'); } }, 1000);
         killHooks.push(() => { if (autoIv) { clearInterval(autoIv); autoIv = null; } });
       }
     });
   }
 
+  function findSubmitButton() {
+    const rx = /^(submit|turn in|turn this in|turn it in|submit assignment|submit for grading|submit your work|save and submit|save & submit|finish|finish assignment|complete|mark complete|submit and close|hand in|hand it in|check|check answer|verify|submit quiz|submit answer)\b/i;
+    const els = visibleEls('button, a, [role="button"], .mdc-button, [mat-flat-button], [mat-raised-button], [mat-stroked-button], input[type="submit"]');
+    for (const el of els) {
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+      const t = ((el.textContent || '') + ' ' + (el.value || '')).trim();
+      if (rx.test(t)) return el;
+    }
+    for (const el of els) {
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+      const lbl = (el.getAttribute('aria-label') || '').trim();
+      if (rx.test(lbl)) return el;
+    }
+    return null;
+  }
+
   async function runFillAssignment() {
     if (KILLED) return;
-    if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') {
-      const k = prompt('Paste your Groq API key (starts with gsk_).');
-      if (k && k.trim()) { CFG.ai.key = k.trim(); saveCfg(); }
-      else return;
-    }
-
+    if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') { const k = prompt('Paste your Groq API key:'); if (k && k.trim()) { CFG.ai.key = k.trim(); saveCfg(); } else return; }
     const lesson = getPendingLesson();
-    if (!lesson) { log('no stashed lesson — run Forge instead'); return; }
-
+    if (!lesson) { log('no stashed lesson'); return; }
     S.running = true; S.busy = true; render();
-    log('fill mode — generating answers for', lesson.title);
-
+    log('fill mode — generating for', lesson.title);
     const submissionText = document.body.innerText || '';
-
     let answers = '';
-    try {
-      answers = await generateAnswersForLesson(lesson, submissionText);
-    } catch (e) {
-      log('answer generation failed:', e.message);
-      S.running = false; S.busy = false; render();
-      return;
-    }
-    if (!answers) {
-      log('empty answer after all attempts — check key + model in Settings');
-      S.lastAnswer = 'Fill failed: model returned empty. Try Settings → Model.';
-      render();
-      S.running = false; S.busy = false; render();
-      return;
-    }
-    log('answers ready —', answers.length, 'chars ·', (answers.match(/\S+/g) || []).length, 'words');
+    try { answers = await generateAnswersForLesson(lesson, submissionText); } catch (e) { log('gen failed:', e.message); S.running = false; S.busy = false; render(); return; }
+    if (!answers) { log('empty answer'); S.lastAnswer = 'Fill failed — model returned empty.'; S.running = false; S.busy = false; render(); return; }
+    log('answers ready —', (answers.match(/\S+/g) || []).length, 'words');
 
     let box = await openSubmissionBox();
     let boxFilled = false;
-    if (box) {
-      boxFilled = await fillSubmissionBox(box, answers);
-      log(boxFilled ? 'comment box filled' : 'could not fill comment box');
-    } else {
-      log('no comment box found — you will need to paste manually');
-    }
+    if (box) { boxFilled = await fillSubmissionBox(box, answers); log(boxFilled ? 'comment box filled' : 'could not fill box'); }
+    else log('no comment box found');
 
     const choice = await showFillPopup(lesson, answers, boxFilled);
-
     try { localStorage.removeItem('__hh_pending_lesson'); } catch {}
-
-    if (choice !== 'confirm') {
-      log('user chose:', choice);
-      S.running = false; S.busy = false; render();
-      return;
-    }
-
-    if (!boxFilled) {
-      box = await openSubmissionBox();
-      if (box) boxFilled = await fillSubmissionBox(box, answers);
-    }
-
+    if (choice !== 'confirm') { S.running = false; S.busy = false; render(); return; }
+    if (!boxFilled) { box = await openSubmissionBox(); if (box) boxFilled = await fillSubmissionBox(box, answers); }
     await sleep(700);
-
     let submit = findSubmitButton();
-    if (!submit) {
-      log('no submit button found — staying on page for manual submit');
-      S.lastAnswer = 'Submit button not found. Click it manually, then Start again.';
-      render();
-      S.running = false; S.busy = false; render();
-      return;
-    }
-
-    log('clicking submit:', (submit.textContent || '').trim().slice(0, 40));
+    if (!submit) { log('no submit — manual'); S.lastAnswer = 'No submit button found.'; S.running = false; S.busy = false; render(); return; }
+    log('clicking submit:', (submit.textContent || submit.value || '').trim().slice(0, 40));
     humanClick(submit);
     await sleep(1800);
-
-    const dialogScopes = [
-      'mat-dialog-container', '[role="dialog"]', '.mat-mdc-dialog-surface',
-      '.mdc-dialog', '.cdk-overlay-pane', '[class*="modal"]'
-    ];
+    const dialogScopes = ['mat-dialog-container', '[role="dialog"]', '.mat-mdc-dialog-surface', '.mdc-dialog', '.cdk-overlay-pane', '[class*="modal"]'];
     let confirmBtn = null;
     for (const scope of dialogScopes) {
       const root = document.querySelector(scope);
       if (!root || root.offsetParent === null) continue;
-      confirmBtn = [...root.querySelectorAll('button, [role="button"]')]
-        .find(b => b.offsetParent !== null && !b.disabled &&
-          /^(yes|confirm|ok|yes,?\s*(submit|turn in)|turn in|submit)\b/i.test((b.textContent || '').trim()));
+      confirmBtn = [...root.querySelectorAll('button, [role="button"]')].find(b => b.offsetParent !== null && !b.disabled &&
+        /^(yes|confirm|ok|yes,?\s*(submit|turn in)|turn in|submit)\b/i.test((b.textContent || '').trim()));
       if (confirmBtn) break;
     }
-
-    if (confirmBtn) {
-      log('confirming dialog:', (confirmBtn.textContent || '').trim().slice(0, 40));
-      humanClick(confirmBtn);
-      await sleep(2200);
-    } else {
-      const anyConfirm = [...document.querySelectorAll('button, [role="button"]')]
-        .find(b => b.offsetParent !== null && !b.disabled && !b.closest('#__hh_ui') &&
-          /^(yes|confirm|ok|yes, submit|turn it in|turn in)$/i.test((b.textContent || '').trim()));
-      if (anyConfirm) {
-        log('confirming (fallback):', (anyConfirm.textContent || '').trim().slice(0, 40));
-        humanClick(anyConfirm);
-        await sleep(2200);
-      }
-    }
-
-    await sleep(900);
-    submit = findSubmitButton();
-    if (submit && !submit.disabled && submit.offsetParent !== null) {
-      log('submit still enabled — retrying click');
-      humanClick(submit);
-      await sleep(1800);
-      const retryConfirm = [...document.querySelectorAll('button, [role="button"]')]
-        .find(b => b.offsetParent !== null && !b.disabled && !b.closest('#__hh_ui') &&
-          /^(yes|confirm|ok|yes, submit|turn it in|turn in)$/i.test((b.textContent || '').trim()));
-      if (retryConfirm) { humanClick(retryConfirm); await sleep(2000); }
-    }
-
+    if (confirmBtn) { humanClick(confirmBtn); await sleep(2200); }
     await sleep(1200);
-    const stillThere = findSubmitButton();
-    const submitted = !stillThere || stillThere.disabled || stillThere.offsetParent === null;
-
+    const still = findSubmitButton();
+    const submitted = !still || still.disabled || still.offsetParent === null;
     S.running = false; S.busy = false; render();
-
-    if (!submitted) {
-      log('submit did not land — staying on this page');
-      S.lastAnswer = 'Submit did not go through. Check manually, then Start again.';
-      render();
-      return;
-    }
-
+    if (!submitted) { log('submit didn\'t land'); S.lastAnswer = 'Submit failed — check manually.'; render(); return; }
     log('submit confirmed — advancing');
     await sleep(randInt(2000, 4000));
     const nav = findNextAssignmentNav();
-    if (nav) {
-      log('→ advancing');
-      humanClick(nav);
-      await sleep(3000);
-
-      const nextKind = classifyPage();
-      log('next page:', nextKind);
-      if (nextKind === 'lesson') { log('resuming lesson chain'); await runLessonChain(); }
-      else if (nextKind === 'quiz') { log('resuming quiz auto'); await loop(); }
-      else if (nextKind === 'cards') { log('resuming card driver'); await runCards(); }
-      else if (nextKind === 'assignment') {
-        if (hasPendingLesson() && !needsFileUpload()) { log('resuming fill mode'); await runFillAssignment(); }
-        else if (window.__forge?.run) { log('resuming forge'); window.__forge.run(); }
-      }
-    } else {
-      log('no next nav — click manually');
-    }
+    if (nav) { humanClick(nav); await sleep(3000); }
   }
 
-  // ---- continuous mode ----
+  // ============================================================
+  // CONTINUOUS MODE
+  // ============================================================
   let __lastUrl = location.href;
   let __lastBodyLen = 0;
   let __continuous = false;
@@ -1204,7 +1261,7 @@ Answers:`;
   async function continuousTick() {
     if (KILLED || !__continuous) return;
     if (S.running) return;
-    if (__continuousGuard++ > 200) { log('continuous: guard hit, stopping'); __continuous = false; return; }
+    if (__continuousGuard++ > 200) { log('continuous: guard hit'); __continuous = false; return; }
 
     const url = location.href;
     const bodyLen = (document.body.innerText || '').length;
@@ -1214,6 +1271,7 @@ Answers:`;
 
     __lastUrl = url;
     __lastBodyLen = bodyLen;
+    S.platform = detectPlatform();
 
     await sleep(randInt(900, 2600));
     if (KILLED || !__continuous) return;
@@ -1221,25 +1279,27 @@ Answers:`;
     if (KILLED || !__continuous) return;
 
     const kind = classifyPage();
-    log('continuous → new page detected:', kind);
+    log('continuous →', kind, '(platform:', S.platform + ')');
+    render();
 
-    if (kind === 'unknown') { log('continuous: unknown page, stopping'); __continuous = false; render(); return; }
+    if (kind === 'unknown') { log('continuous: unknown — stopping'); __continuous = false; render(); return; }
 
-    if (kind === 'lesson' && (findCompletionIndicator() || isAssignmentComplete())) {
-      log('continuous: lesson already done, advancing');
+    if (kind === 'buzz-lesson' && (findCompletionIndicator() || isAssignmentComplete())) {
+      log('lesson already done, advancing');
       const nav = findNextAssignmentNav();
       if (nav) { humanClick(nav); await sleep(randInt(2200, 4000)); return; }
     }
 
-    if (kind === 'quiz') { await loop(); return; }
-    if (kind === 'cards') { await runCards(); return; }
-    if (kind === 'lesson') { await runLessonChain(); return; }
+    if (kind === 'buzz-quiz') { await loop(); return; }
+    if (kind === 'buzz-cards') { await runCards(); return; }
+    if (kind === 'buzz-lesson') { await runLessonChain(); return; }
+    if (kind === 'universal-quiz') { await universalLoop(); return; }
     if (kind === 'assignment') {
       if (hasPendingLesson() && !needsFileUpload()) { await runFillAssignment(); return; }
-      if (window.__forge?.run) {
-        const t = document.querySelector('#__hh_panel .hh-tab[data-tab="forge"]');
+      if (window.__solve?.run) {
+        const t = document.querySelector('#__hh_panel .hh-tab[data-tab="solve"]');
         if (t) t.click();
-        window.__forge.run();
+        window.__solve.run();
       }
       return;
     }
@@ -1250,48 +1310,39 @@ Answers:`;
     __continuousGuard = 0;
     __lastUrl = location.href;
     __lastBodyLen = (document.body.innerText || '').length;
-    log('continuous mode ON');
+    S.platform = detectPlatform();
+    log('continuous ON · platform:', S.platform);
     render();
   }
-  function stopContinuous() {
-    __continuous = false;
-    log('continuous mode OFF');
-    render();
-  }
+  function stopContinuous() { __continuous = false; log('continuous OFF'); render(); }
 
   // ---- smart start ----
   async function startSmart() {
     if (KILLED) return;
     if (S.running || __continuous) { stop(); stopContinuous(); return; }
 
-    if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE' && classifyPage() === 'assignment') {
+    S.platform = detectPlatform();
+    if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') {
       const k = prompt('Paste your Groq API key (starts with gsk_). It will be saved.');
       if (k && k.trim()) { CFG.ai.key = k.trim(); saveCfg(); log('key saved'); }
     }
 
     startContinuous();
-
     const kind = classifyPage();
-    log('startSmart →', kind);
+    log('start →', kind, '·', S.platform);
 
-    if (kind === 'quiz') { log('quiz — auto'); loop(); return; }
-    if (kind === 'cards') { log('flashcards — card driver'); await runCards(); return; }
-    if (kind === 'lesson') { log('lesson — AFK chain'); await runLessonChain(); return; }
+    if (kind === 'buzz-quiz') { await loop(); return; }
+    if (kind === 'buzz-cards') { await runCards(); return; }
+    if (kind === 'buzz-lesson') { await runLessonChain(); return; }
+    if (kind === 'universal-quiz') { await universalLoop(); return; }
     if (kind === 'assignment') {
-      if (hasPendingLesson() && !needsFileUpload()) {
-        log('fill mode — answering stashed questions');
-        await runFillAssignment();
-        return;
-      }
-      log('assignment — forge');
-      if (window.__forge?.run) {
-        const t = document.querySelector('#__hh_panel .hh-tab[data-tab="forge"]');
+      if (hasPendingLesson() && !needsFileUpload()) { await runFillAssignment(); return; }
+      log('assignment — solve');
+      if (window.__solve?.run) {
+        const t = document.querySelector('#__hh_panel .hh-tab[data-tab="solve"]');
         if (t) t.click();
-        window.__forge.run();
-      } else {
-        S.lastAnswer = 'Forge not loaded. Wait 2s and retry.';
-        render();
-      }
+        window.__solve.run();
+      } else { S.lastAnswer = 'Solve not loaded.'; render(); }
       return;
     }
     log('unknown page — nothing to do');
@@ -1308,20 +1359,10 @@ Answers:`;
     S.chat.push({ role: 'assistant', content: '', id, streaming: true });
     render();
     try {
-      await groqCall(
-        [
-          { role: 'system', content: 'You are Homework Helper. Direct, sharp, no filler. Answer the question actually asked.' },
-          ...S.chat.filter(m => !m.streaming).map(m => ({ role: m.role, content: m.content }))
-        ],
-        {
-          stream: true, maxTokens: 900,
-          onDelta: d => {
-            if (KILLED) return;
-            const m = S.chat.find(x => x.id === id);
-            if (m) { m.content += d; renderChat(); }
-          }
-        }
-      );
+      await groqCall([{ role: 'system', content: 'You are Homework Helper. Direct, sharp, no filler.' },
+        ...S.chat.filter(m => !m.streaming).map(m => ({ role: m.role, content: m.content }))],
+        { stream: true, maxTokens: 900,
+          onDelta: d => { if (KILLED) return; const m = S.chat.find(x => x.id === id); if (m) { m.content += d; renderChat(); } } });
     } catch (e) {
       if (KILLED) return;
       const m = S.chat.find(x => x.id === id);
@@ -1344,56 +1385,45 @@ Answers:`;
     const el = document.createElement('div');
     el.id = UI_ID;
     el.innerHTML = `
-      <div id="${PID}" style="
-        position: fixed; top: 16px; right: 16px; z-index: 2147483647;
-        width: 320px; background: #1a1a1a; color: #f0f0f0;
-        border: 1px solid #e07b39; border-radius: 10px;
-        font: 12px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-        box-shadow: 0 8px 24px rgba(0,0,0,.5); overflow: hidden;">
-
-        <div id="${PID}_hdr" style="
-          background:#e07b39;color:#1a1a1a;padding:8px 12px;font-weight:700;
-          display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
+      <div id="${PID}" style="position:fixed;top:16px;right:16px;z-index:2147483647;width:320px;background:#1a1a1a;color:#f0f0f0;border:1px solid #e07b39;border-radius:10px;font:12px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.5);overflow:hidden;">
+        <div id="${PID}_hdr" style="background:#e07b39;color:#1a1a1a;padding:8px 12px;font-weight:700;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
           <span>Homework Helper</span>
-          <span id="${PID}_x" style="cursor:pointer;font-size:16px;line-height:1">×</span>
+          <span id="${PID}_x" style="cursor:pointer;font-size:16px;">×</span>
         </div>
-
         <div id="${PID}_tabs" style="display:flex;background:#141414;border-bottom:1px solid #262626;padding:4px 6px 0;gap:2px;">
           <button class="hh-tab" data-tab="auto" style="flex:1;background:#1a1a1a;border:0;color:#e07b39;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:600;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid #e07b39;">Auto</button>
           <button class="hh-tab" data-tab="ask" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">Ask</button>
-          <button class="hh-tab" data-tab="forge" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">Forge</button>
+          <button class="hh-tab" data-tab="solve" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">Solve</button>
           <button class="hh-tab" data-tab="hist" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">History</button>
           <button class="hh-tab" data-tab="cfg" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">Settings</button>
         </div>
-
         <div style="padding:10px 12px;max-height:440px;overflow-y:auto;">
-
           <div class="hh-view" data-view="auto">
             <div style="display:flex;gap:6px;margin-bottom:8px">
               <button id="${PID}_toggle" style="flex:1;padding:6px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Start</button>
               <button id="${PID}_skip" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Skip</button>
               <button id="${PID}_explain" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Explain</button>
             </div>
-            <div style="font-size:11px;color:#aaa;margin-bottom:4px">Status: <span id="${PID}_status" style="color:#4caf50">idle</span> · Processed: <span id="${PID}_count">0</span> · Req: <span id="${PID}_req">0</span></div>
+            <div style="font-size:11px;color:#aaa;margin-bottom:4px">Platform: <span id="${PID}_plat" style="color:#e07b39">—</span> · Status: <span id="${PID}_status" style="color:#4caf50">idle</span></div>
+            <div style="font-size:11px;color:#aaa;margin-bottom:4px">Processed: <span id="${PID}_count">0</span> · Req: <span id="${PID}_req">0</span></div>
             <div style="font-size:11px;color:#aaa;margin-bottom:2px">Last Q: <span id="${PID}_lq" style="color:#ddd">—</span></div>
             <div style="font-size:11px;color:#aaa;margin-bottom:6px;word-break:break-word">Last A: <span id="${PID}_la" style="color:#4caf50">—</span></div>
             <div id="${PID}_log" style="max-height:120px;overflow:auto;background:#0e0e0e;border-radius:6px;padding:6px;font:11px/1.4 ui-monospace,Menlo,monospace;color:#9ccc65;white-space:pre-wrap"></div>
           </div>
-
           <div class="hh-view" data-view="ask" style="display:none">
             <div id="${PID}_chat" style="display:flex;flex-direction:column;gap:6px;padding-bottom:6px;max-height:300px;overflow-y:auto"></div>
             <div style="display:flex;gap:6px;margin-top:6px">
-              <textarea id="${PID}_chatIn" placeholder="Ask anything… Enter to send" style="flex:1;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;resize:none;height:40px"></textarea>
+              <textarea id="${PID}_chatIn" placeholder="Ask anything…" style="flex:1;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;resize:none;height:40px"></textarea>
               <button id="${PID}_chatSend" style="padding:6px 10px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Send</button>
             </div>
           </div>
-
-          <div class="hh-view" data-view="forge" style="display:none">
-            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Assignment type (blank = auto)</div>
+          <div class="hh-view" data-view="solve" style="display:none">
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Type (blank = auto)</div>
             <select id="${PID}_fType" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
               <option value="">Auto-detect</option>
               <option value="written">Written (prose)</option>
               <option value="presentation">Presentation / slides</option>
+              <option value="infographic">Infographic / poster</option>
               <option value="canva">Canva / visual design</option>
               <option value="flashcards">Flashcards</option>
               <option value="video">Video script</option>
@@ -1404,7 +1434,7 @@ Answers:`;
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Voice sample (saved)</div>
             <textarea id="${PID}_fStyle" placeholder="Paste a paragraph you wrote." style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px;resize:vertical;height:60px"></textarea>
             <div style="display:flex;gap:6px;margin-bottom:8px">
-              <button id="${PID}_fGo" style="flex:1;padding:6px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Forge</button>
+              <button id="${PID}_fGo" style="flex:1;padding:6px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Solve</button>
               <button id="${PID}_fCopy" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Copy All</button>
               <button id="${PID}_fDl" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">.txt</button>
             </div>
@@ -1414,18 +1444,16 @@ Answers:`;
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Deliverables</div>
             <div id="${PID}_fOut" style="display:flex;flex-direction:column;gap:6px"></div>
           </div>
-
           <div class="hh-view" data-view="hist" style="display:none">
             <div style="display:flex;gap:6px;margin-bottom:8px">
               <button id="${PID}_hExport" style="flex:1;padding:6px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Export</button>
               <button id="${PID}_hClear" style="flex:1;padding:6px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Clear</button>
             </div>
-            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Quiz answers</div>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Answers</div>
             <div id="${PID}_hQuiz" style="display:flex;flex-direction:column;gap:5px;max-height:140px;overflow-y:auto"></div>
-            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Forge runs</div>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Solve runs</div>
             <div id="${PID}_hForge" style="display:flex;flex-direction:column;gap:5px;max-height:140px;overflow-y:auto"></div>
           </div>
-
           <div class="hh-view" data-view="cfg" style="display:none">
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Model</div>
             <input id="${PID}_m" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
@@ -1433,19 +1461,16 @@ Answers:`;
             <input id="${PID}_k" type="password" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Temperature <span id="${PID}_tv" style="color:#e07b39"></span></div>
             <input id="${PID}_t" type="range" min="0" max="1" step="0.05" style="width:100%;accent-color:#e07b39">
-            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Auto-submit timer (0 = off)</div>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Auto-submit (0 = off)</div>
             <input id="${PID}_auto" type="number" min="0" max="120" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
-            <div style="font-size:10px;color:#666;margin-top:4px;line-height:1.5">If set, the fill popup auto-confirms after N seconds. 0 = wait for you.</div>
             <div style="font-size:10px;color:#666;margin-top:8px;text-align:center">Ctrl+Shift+H toggle · × closes & tears down</div>
           </div>
         </div>
-
         <div style="display:flex;justify-content:space-between;padding:5px 12px;font:10px ui-monospace,monospace;color:#555;background:#0a0a0a;border-top:1px solid #1a1a1a">
           <span id="${PID}_fModel">—</span>
           <span id="${PID}_fTok">0 / 0</span>
         </div>
-      </div>
-    `;
+      </div>`;
     document.body.appendChild(el);
     wireUI();
     render();
@@ -1474,7 +1499,7 @@ Answers:`;
     $('_toggle').onclick = startSmart;
     $('_skip').onclick = () => { const b = findNextButton(); if (b) { humanClick(b); log('skip'); } };
     $('_explain').onclick = async () => {
-      if (KILLED || !S.lastQuestion || S.lastQuestion === '—') { log('no current question'); return; }
+      if (KILLED || !S.lastQuestion || S.lastQuestion === '—') return;
       const t = document.querySelector('#' + PID + ' .hh-tab[data-tab="ask"]');
       if (t) t.click();
       await sendChat(`Explain the reasoning behind this answer in 3-4 sentences: ${S.lastQuestion}`);
@@ -1503,7 +1528,7 @@ Answers:`;
     $('_chatSend').onclick = () => { sendChat(ci.value); ci.value = ''; };
 
     $('_hExport').onclick = () => {
-      const blob = new Blob([JSON.stringify({ quiz: S.history, forge: window.__forge?.F?.history || [] }, null, 2)], { type: 'application/json' });
+      const blob = new Blob([JSON.stringify({ quiz: S.history, solve: window.__solve?.F?.history || [] }, null, 2)], { type: 'application/json' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'helper-history-' + Date.now() + '.json';
@@ -1511,7 +1536,7 @@ Answers:`;
     };
     $('_hClear').onclick = () => {
       S.history = [];
-      if (window.__forge?.F) window.__forge.F.history = [];
+      if (window.__solve?.F) window.__solve.F.history = [];
       try { localStorage.removeItem('__hh_forge_hist'); } catch {}
       render();
     };
@@ -1547,7 +1572,7 @@ Answers:`;
     try { if (window.__helperForgeBoot) { clearInterval(window.__helperForgeBoot); window.__helperForgeBoot = null; } } catch {}
     try { document.getElementById(UI_ID)?.remove(); } catch {}
     try { document.getElementById('__hh_fill_popup')?.remove(); } catch {}
-    try { if (window.__forge) delete window.__forge; } catch {}
+    try { if (window.__solve) delete window.__solve; } catch {}
     try { delete window.__cinder; } catch {}
     console.log('%c[hw-helper] closed — paste the loader again to reload.', 'color:#e07b39;font-weight:bold');
   }
@@ -1582,13 +1607,13 @@ Answers:`;
     if (q) {
       q.innerHTML = S.history.length
         ? S.history.slice().reverse().slice(0, 20).map(h =>
-            `<div style="background:#0e0e0e;border-radius:6px;padding:6px 8px;font-size:11px;border-left:2px solid #e07b39;color:#ccc"><b style="color:#e07b39">${esc(h.pickedText.join(' | ').slice(0, 90))}</b></div>`
+            `<div style="background:#0e0e0e;border-radius:6px;padding:6px 8px;font-size:11px;border-left:2px solid #e07b39;color:#ccc"><b style="color:#e07b39">${esc((h.pickedText||[]).join(' | ').slice(0, 90))}</b></div>`
           ).join('')
         : '<div style="background:#0e0e0e;border-radius:6px;padding:6px 8px;font-size:11px;color:#666">none yet</div>';
     }
     const f = $('_hForge');
     if (f) {
-      const H = window.__forge?.F?.history || [];
+      const H = window.__solve?.F?.history || [];
       f.innerHTML = H.length
         ? H.slice(0, 20).map(h =>
             `<div style="background:#0e0e0e;border-radius:6px;padding:6px 8px;font-size:11px;border-left:2px solid #e07b39;color:#ccc"><b style="color:#e07b39">${esc((h.title || 'assignment').slice(0, 60))}</b> — ${h.deliverables?.length || 0}</div>`
@@ -1609,6 +1634,7 @@ Answers:`;
       tg.textContent = active ? 'Stop' : 'Start';
       tg.style.background = active ? '#c62828' : '#2e7d32';
     }
+    if ($('_plat')) $('_plat').textContent = S.platform || 'unknown';
     if ($('_count')) $('_count').textContent = S.processed;
     if ($('_req')) $('_req').textContent = S.requests;
     if ($('_lq')) $('_lq').textContent = S.lastQuestion;
@@ -1625,8 +1651,9 @@ Answers:`;
     PID
   };
 
+  S.platform = detectPlatform();
   ensureUI();
-  log('helper ready · ' + CFG.ai.model);
+  log('helper ready · ' + CFG.ai.model + ' · platform: ' + S.platform);
 
   (function tick() {
     if (KILLED) return;
@@ -1640,11 +1667,11 @@ Answers:`;
   spoofFocus();
   setInterval(spoofFocus, 30000);
 
-  if (CFG.autoStart) loop();
+  if (CFG.autoStart) startSmart();
 })();
 
 // ============================================================
-// FORGE
+// SOLVE
 // ============================================================
 (() => {
   'use strict';
@@ -1654,7 +1681,7 @@ Answers:`;
   const C = window.__cinder;
   const isDead = () => DEAD || !C || C.isKilled();
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const log = (...a) => { if (!isDead()) C.log('[forge]', ...a); };
+  const log = (...a) => { if (!isDead()) C.log('[solve]', ...a); };
   const $ = suf => document.getElementById(PID + suf);
   const esc = s => C.esc(s);
 
@@ -1680,11 +1707,14 @@ Answers:`;
   };
 
   const cleanText = t => String(t).replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
+  const visibleEls = (sel, root = document) => [...root.querySelectorAll(sel)].filter(el => el.offsetParent !== null && !el.closest('#__hh_ui'));
 
   function detectType(text) {
     const t = (text || '').toLowerCase();
-    if (/\bcanva\.com\b/i.test(t) || /\buse\s+canva\b/i.test(t) || /\bopen\s+canva\b/i.test(t) || /\bcreate.*?\bin\s+canva\b/i.test(t) || /\bcanva\s+(template|design|slide)/i.test(t)) return 'canva';
-    if (/\b(slide|slides|presentation|powerpoint|google slides|deck)\b/.test(t)) return 'presentation';
+    if (/\b(infographic|one[\s-]?pager|poster|brochure|flyer)\b/i.test(t)) return 'infographic';
+    if (/\b(canva|word|google\s*docs)\s+(to\s+)?(make|create|build|design)/i.test(t) && /\b(infographic|poster|brochure|flyer)\b/i.test(t)) return 'infographic';
+    if (/\b(canva|canva\.com)\b/i.test(t) || /\buse\s+canva\b/i.test(t) || /\bopen\s+canva\b/i.test(t) || /\bcreate.*?\bin\s+canva\b/i.test(t)) return 'canva';
+    if (/\b(slide|slides|presentation|powerpoint|google slides|deck|slideshow)\b/.test(t)) return 'presentation';
     if (/\b(flashcard|flash card|quizlet|anki|term and definition|vocab card)\b/.test(t)) return 'flashcards';
     if (/\b(record a video|loom|screencastify|voiceover|voice over|narrate)\b/.test(t)) return 'video';
     if (/\b(go to|visit|navigate to|sign up at|log in to|create an account on)\b/.test(t) && /https?:\/\/|\.com|\.org|\.net/.test(t)) return 'walkthrough';
@@ -1693,38 +1723,55 @@ Answers:`;
 
   const TYPE_INSTRUCTIONS = {
     written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable unless a length is specified. No bullets unless the step itself is a list prompt.`,
-    presentation: `OUTPUT SHAPE: Slide-by-slide. For each deliverable:
+    infographic: `OUTPUT SHAPE: ONE deliverable — a content plan. NOT steps like "open Canva". Give the CONTENT.
+
+TITLE: <short, punchy title>
+
+SECTION 1 — <section name>
+Heading: <exact heading to type>
+Text: <2-3 sentences>
+
+SECTION 2 — <section name>
+Heading: <exact heading to type>
+Text: <2-3 sentences>
+
+SECTION 3 — <section name>
+Heading: <exact heading to type>
+Text: <2-3 sentences>
+
+VISUAL NOTES:
+- Icon ideas per section
+- Color palette (2-3 colors)
+- Layout hint
+
+ONE deliverable. Merge all steps if steps are listed.`,
+    presentation: `OUTPUT SHAPE: Slide-by-slide.
 Slide 1: <title>
 - bullet
 - bullet
-Speaker notes: one sentence of what to say
+Speaker notes: one sentence
 
-Slide 2: <title>
-...
-Aim for 5–8 slides per deliverable unless the step specifies a count. Keep bullets under 12 words each.`,
-    canva: `OUTPUT SHAPE: Numbered build steps for Canva. For each deliverable:
-1. Open Canva → search "<template type>" → pick a clean template.
-2. Title slide text: "<exact text>"
-3. Slide 2: <what goes on it, exact text to type>
-4. Element to add: <icon/photo/graphic idea>
-5. Color scheme: <suggest 2–3 colors>
-Give exact text the student types into each element.`,
-    flashcards: `OUTPUT SHAPE: Numbered term/definition pairs. For each deliverable:
+Aim for 5–8 slides unless count specified. Bullets under 12 words.`,
+    canva: `OUTPUT SHAPE: Numbered build steps:
+1. Open Canva → search "<template>" → pick clean template.
+2. Title text: "<exact text>"
+3. Slide 2: <content>
+4. Element to add: <icon/photo idea>
+5. Colors: <2-3>
+Give exact text to type.`,
+    flashcards: `OUTPUT SHAPE: Numbered term/definition pairs.
 1. Term: "<term>"
-   Definition: "<one-sentence plain-language definition>"
-2. Term: "<term>"
-   Definition: "<one-sentence plain-language definition>"
-Give 8–15 cards per deliverable unless the step specifies a count. Definitions must be one sentence, no jargon.`,
-    video: `OUTPUT SHAPE: Script. For each deliverable:
-[0:00] <what to say, word for word>
+   Definition: "<one-sentence>"
+Give 8–15 cards unless count specified.`,
+    video: `OUTPUT SHAPE: Script.
+[0:00] <what to say>
 [0:15] <next beat>
-Include what to show on screen next to each beat. Aim for 1–2 minutes of script per deliverable.`,
-    walkthrough: `OUTPUT SHAPE: Numbered navigation steps. For each deliverable:
-1. Go to <url or site name>.
-2. Click "<exact button label>".
-3. Enter <what to type>.
-4. On the next page, click "<exact label>".
-Include exact button names and URLs. If an account is required, note it. Keep each step one action.`
+Include what to show on screen.`,
+    walkthrough: `OUTPUT SHAPE: Numbered navigation steps.
+1. Go to <url>.
+2. Click "<label>".
+3. Enter <what>.
+Keep each step one action.`
   };
 
   function findStepTabs() {
@@ -1753,12 +1800,7 @@ Include exact button names and URLs. If an account is required, note it. Keep ea
     }
     const snap = () => cleanText(document.body.innerText);
     let prev = snap();
-    const activeNow = tabs.find(t =>
-      /active|selected/i.test(t.className) ||
-      t.getAttribute('aria-selected') === 'true' ||
-      t.classList.contains('mdc-tab--active')
-    ) || tabs[0];
-
+    const activeNow = tabs.find(t => /active|selected/i.test(t.className) || t.getAttribute('aria-selected') === 'true' || t.classList.contains('mdc-tab--active')) || tabs[0];
     for (const tab of tabs) {
       if (isDead()) return out;
       const label = tab.textContent.trim();
@@ -1791,14 +1833,13 @@ Include exact button names and URLs. If an account is required, note it. Keep ea
 
   function buildPrompt(steps, ctx, style, fields, type) {
     const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 1800)}`).join('\n\n');
-
     let pendingBlock = '';
     try {
       const raw = localStorage.getItem('__hh_pending_lesson');
       if (raw) {
         const p = JSON.parse(raw);
         if (p && p.ts && (Date.now() - p.ts) < 30 * 60 * 1000) {
-          pendingBlock = `\n\nPRIOR LESSON CONTEXT (the questions on this page refer back to this — use it as source material):\n"""\n${p.title}\n---\n${p.text.slice(0, 2500)}\n"""\n`;
+          pendingBlock = `\n\nPRIOR LESSON CONTEXT:\n"""\n${p.title}\n---\n${p.text.slice(0, 2500)}\n"""\n`;
           localStorage.removeItem('__hh_pending_lesson');
           log('using stashed lesson context:', p.title);
         }
@@ -1806,84 +1847,67 @@ Include exact button names and URLs. If an account is required, note it. Keep ea
     } catch {}
 
     const ctxBlock = ctx && ctx.trim()
-      ? `\n\nSTUDENT'S PROJECT — every deliverable is about THIS:\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
-      : `\n\nNO PROJECT CONTEXT. If any step mentions "your project", "your AI", "your proposal", output exactly "[NEED PROJECT CONTEXT — paste in Forge tab]" for that deliverable. Do NOT invent.`;
-    const styleBlock = style && style.trim()
-      ? `\n\nSTUDENT'S VOICE SAMPLE (match this exactly):\n"""\n${style.trim().slice(0, 1400)}\n"""`
-      : '';
+      ? `\n\nSTUDENT'S PROJECT:\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
+      : `\n\nNO PROJECT CONTEXT. If a step mentions "your project", output "[NEED PROJECT CONTEXT — paste in Solve tab]".`;
+    const styleBlock = style && style.trim() ? `\n\nSTUDENT'S VOICE SAMPLE:\n"""\n${style.trim().slice(0, 1400)}\n"""` : '';
     const fieldsBlock = fields.length
       ? `\n\nEXISTING TEXT ON PAGE:\n` + fields.map((f, i) => `[field ${i + 1}${f.hint ? ' — ' + f.hint : ''}]\n${f.value}`).join('\n\n')
       : '';
 
-    return `Respond with a single JSON object and nothing else. First char must be {, last must be }.
+    return `Respond with a single JSON object. First char {, last char }.
 
-You are a real 11th grade student completing a class assignment. Output is pasted verbatim into a submission box. You write like a normal high schooler — not an adult, not a chatbot, not a resume.
+You are a real 11th grade student. Output is pasted verbatim. You write like a normal high schooler.
 
 === STRUCTURE ===
-Steps in order: ${steps.map(s => s.label).join(' | ')}
-Produce ONE deliverable per step, same order.
-Skip steps labeled "Overview" or "Introduction" if they only describe the assignment — those are navigation, not asks.
-If a step's content is under 80 chars, write "[no content scraped]" — do NOT invent.
-Label each deliverable EXACTLY as the step label.
-Only merge steps whose labels are literally identical.
+Steps: ${steps.map(s => s.label).join(' | ')}
+Produce ONE deliverable per step.
+EXCEPTION: infographic / presentation = ONE artifact. Merge ALL steps into one deliverable.
+Skip "Overview"/"Introduction" if they only describe the assignment.
+If a step is under 80 chars, write "[no content scraped]".
+Label each deliverable EXACTLY as step label.
 
 === OUTPUT SHAPE ===
-Assignment type: ${type}
+Type: ${type}
 ${TYPE_INSTRUCTIONS[type] || TYPE_INSTRUCTIONS.written}
 
 === CONTENT ===
-Imagine the reader is holding the finished document. They see the section heading. They want to read what's UNDER that heading.
-Write that content.
+Write the actual content the reader reads UNDER the heading.
+Do not name the section, template, introduction, or document.
+Do not describe what the section does.
+Do not close with reflective meta-tails.
+Every deliverable references the student's project.
+Sub-questions answered in order inside the deliverable.
+If a step says "include X, Y, Z," write X, Y, Z.
 
-Do not reference the document. Do not name the section. Do not say "the template," "the introduction," "the proposal," "this section," "the document," or any variation.
-Do not describe what the section does, contains, or explains.
-Do not open with "The [section name]..." or "This section..." or "My [document part]..."
-Do not close with reflective lines about what the section accomplishes ("By stating these limits...", "This helps readers understand...", "This balance shows...").
-
-Start with the actual first sentence of content. End on the actual point.
-The label tells you where it goes. Do not write the label into the answer.
-Every deliverable references the student's project by actual name or clear descriptor.
-If a step has sub-questions, answer each inside that deliverable, in order.
-If the assignment step itself says "in this section include X, Y, Z," write X, Y, Z as real sentences. Do not describe including them.
-Also ban reflective meta-tails at the end of a deliverable: "By stating these limits...", "Readers will see...", "This helps the project...". End on the actual point.
-
-=== EXAMPLES (this is the most important rule) ===
-If the assignment asks for personal examples, use things a real high schooler actually touches every day. Spotify playlists. YouTube. TikTok. Instagram. Google Docs. Notes app. Phone camera roll. School email. A school Chromebook. A shared Google Slides deck. Classroom assignments. Discord.
-Do NOT invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built, professional projects, or anything that sounds like an adult at a tech company.
-Do NOT stack 5-6 examples just to fill space. 2-3 short ones then answer the question.
-When in doubt, use generic terms ("a playlist app", "a school spreadsheet") rather than specific and made-up.
+=== EXAMPLES ===
+Use things a real high schooler touches: Spotify, YouTube, TikTok, Instagram, Google Docs, Notes app, camera roll, school email, Chromebook, shared Slides, Discord.
+NEVER invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built.
+2-3 short examples max.
+When unsure, generic ("a playlist app", "a school spreadsheet").
 
 === LENGTH ===
-If any step or prompt includes a length requirement (e.g. "100 words", "3-5 sentences", "at least 200 words"), obey it EXACTLY. Match the count. Do not fall short.
-If no length is specified, keep each deliverable to 60-120 words.
+If a length is stated, obey it exactly. Otherwise 60-120 words.
 
 === VOICE ===
-10th grade reading level. Plain words. Short sentences.
-Contractions: I'm, it's, doesn't, can't, won't.
-One idea per sentence. No sentence over 20 words unless it needs to be.
-Say "it", "my project", "my AI" — NEVER "the system", "the platform", "the AI application".
-No semicolons. No markdown headers. No **bold**. Plain prose.
-Bullets only if the step itself is a list prompt.
+10th grade level. Plain words. Short sentences.
+Contractions. One idea per sentence.
+Say "it", "my project", "my AI" — never "the system" or "the platform".
+No semicolons, no markdown headers, no bold.
+Bullets only if the step is a list prompt.
 Ban: furthermore, moreover, additionally, in conclusion, plays a crucial role, leverages, facilitates, underscores, optimal, robust.
-Don't start two sentences the same way.
 
-=== ASSIGNMENT CONTENT ===
+=== ASSIGNMENT ===
 ${stepBlob}${pendingBlock}${ctxBlock}${styleBlock}${fieldsBlock}
 
 Schema:
-{
-  "assignment_title": "<inferred>",
-  "deliverables": [
-    { "label": "<exact step label>", "answer": "<per length rule>" }
-  ]
-}
-JSON only. No backticks. No commentary.`;
+{"assignment_title":"<inferred>","deliverables":[{"label":"<step>","answer":"<text>"}]}
+JSON only.`;
   }
 
   function parse(raw) {
     let s = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
     const m = s.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error('no JSON in reply');
+    if (!m) throw new Error('no JSON');
     const o = JSON.parse(m[0]);
     if (!Array.isArray(o.deliverables)) throw new Error('no deliverables');
     return o;
@@ -1892,20 +1916,18 @@ JSON only. No backticks. No commentary.`;
   async function cleanDeliverables(deliverables) {
     if (!deliverables.length) return deliverables;
     const list = deliverables.map((d, i) => `[${i}]\n${d.answer}`).join('\n\n---\n\n');
-    const prompt = `Rewrite each numbered passage below so it contains ONLY the actual content — no references to any document, section, template, or introduction.
+    const prompt = `Rewrite each passage to remove meta-narration and fake adult examples.
 
 Rules:
-- Delete any sentence that names a section, document, or template.
-- Delete any opening that describes the passage.
-- Delete any closing that describes the passage's effect.
-- If any passage invents a fake adult experience (jobs, companies, paid work, datasets, corporate projects), replace with something a real high schooler would have (apps, school stuff, phone stuff). Keep it short.
-- Keep every concrete fact, task, weakness, mitigation, and example.
-- Keep first-person voice, plain language, contractions.
-- Preserve the word count as closely as possible.
-- If a passage is already clean, return it unchanged.
+- Delete any sentence naming a section/document/template.
+- Delete openings that describe the passage.
+- Delete closings that describe the passage's effect.
+- Replace fake adult examples (jobs, companies, paid work, datasets) with high schooler things (apps, school stuff, phone stuff).
+- Keep every concrete fact, example, weakness, mitigation.
+- Preserve word count as closely as possible.
+- If a passage is already clean, return unchanged.
 
-Schema — return STRICT JSON only:
-{ "items": ["<rewritten passage 0>", "<rewritten passage 1>", ...] }
+Schema: {"items":["<rewritten 0>","<rewritten 1>",...]}
 
 Passages:
 ${list}`;
@@ -1918,7 +1940,7 @@ ${list}`;
       if (!Array.isArray(o.items) || o.items.length !== deliverables.length) return deliverables;
       return deliverables.map((d, i) => ({ ...d, answer: String(o.items[i] || d.answer).trim() }));
     } catch (e) {
-      log('cleanup pass failed — using raw output:', e.message);
+      log('cleanup failed:', e.message);
       return deliverables;
     }
   }
@@ -1938,27 +1960,27 @@ ${list}`;
       const fields = findEditableFields();
       const allText = steps.map(s => s.content).join('\n');
       const detectedType = Ctx.typeOverride || detectType(allText);
-      log('assignment type:', detectedType);
+      log('type:', detectedType);
       const prompt = buildPrompt(steps, Ctx.project, Ctx.style, fields, detectedType);
-      log('prompt', prompt.length, 'chars →', C.CFG.ai.model);
+      log('prompt', prompt.length, 'chars');
       const raw = await C.groqJson(prompt, 5000);
       if (isDead()) return;
       const parsed = parse(raw);
       F.title = parsed.assignment_title || document.title || 'Assignment';
       F.deliverables = parsed.deliverables;
       if (detectedType === 'written') {
-        log('cleanup pass — stripping meta-narration + fake examples');
+        log('cleanup pass');
         F.deliverables = await cleanDeliverables(F.deliverables);
         if (isDead()) return;
       }
       F.history.unshift({ ts: Date.now(), title: F.title, steps: steps.length, deliverables: F.deliverables });
       F.history = F.history.slice(0, 30);
       try { localStorage.setItem(LS_HIS, JSON.stringify(F.history)); } catch {}
-      log('forged', F.deliverables.length, 'in', ((Date.now() - t0) / 1000).toFixed(1) + 's');
+      log('solved', F.deliverables.length, 'in', ((Date.now() - t0) / 1000).toFixed(1) + 's');
     } catch (e) {
       if (isDead() || e.message === 'killed') return;
-      log('forge failed:', e.message);
-      F.deliverables = [{ label: 'Error', answer: 'Forge failed: ' + e.message }];
+      log('solve failed:', e.message);
+      F.deliverables = [{ label: 'Error', answer: 'Solve failed: ' + e.message }];
     } finally {
       F.running = false;
       if (!isDead()) renderForge();
@@ -1970,7 +1992,7 @@ ${list}`;
     const tabsBar = $('_tabs');
     if (!tabsBar || tabsBar.dataset.forgeBound) return;
     tabsBar.dataset.forgeBound = '1';
-    const btn = tabsBar.querySelector('[data-tab="forge"]');
+    const btn = tabsBar.querySelector('[data-tab="solve"]');
     if (btn) btn.addEventListener('click', () => { if (!isDead()) renderForge(); });
 
     const ty = $('_fType');
@@ -1988,7 +2010,7 @@ ${list}`;
     if (isDead()) return;
     const st = $('_fStatus');
     if (st) st.textContent = F.running
-      ? 'forging… scraping + calling model'
+      ? 'solving…'
       : (F.deliverables.length ? `done — ${F.deliverables.length} deliverable(s)${F.title ? ' · ' + F.title : ''}` : 'idle');
     const sEl = $('_fSteps');
     if (sEl) {
@@ -2046,12 +2068,12 @@ ${list}`;
       clearInterval(window.__helperForgeBoot);
       window.__helperForgeBoot = null;
       inject();
-      log('forge ready.');
+      log('solve ready.');
     } else if (Date.now() - start > 15000) {
       clearInterval(window.__helperForgeBoot);
       window.__helperForgeBoot = null;
     }
   }, 250);
 
-  window.__forge = { run: forge, F, scrape: scrapeAllSteps };
+  window.__solve = { run: forge, F, scrape: scrapeAllSteps };
 })();
