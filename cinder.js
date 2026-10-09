@@ -1,6 +1,6 @@
 // language: JavaScript, file: homework-helper.js, runtime: browser console on Buzz Angular
 // Homework Helper — Auto (quiz) + Ask (chat) + Forge (classwork) + History + Settings.
-// Compact UI, persisted settings, retry-on-JSON-fail. Groq backend.
+// Simple UI: orange header, no logos, no emojis. × fully tears down.
 
 // ============================================================
 // CORE
@@ -12,7 +12,6 @@
   const __timers = new Set();
   const ABORT = new AbortController();
   const SIG = { signal: ABORT.signal };
-
   const clrAll = () => { for (const id of __timers) { clearTimeout(id); clearInterval(id); } __timers.clear(); };
   const sleep = ms => new Promise(res => {
     if (KILLED) return res();
@@ -22,14 +21,12 @@
 
   const killHooks = window.__helperKillHooks = window.__helperKillHooks || [];
 
-  // ---- persisted config ----
   const LS = '__hh_cfg_v1';
-  const loadCfg = () => { try { return JSON.parse(localStorage.getItem(LS) || '{}'); } catch { return {}; } };
-  const saved = loadCfg();
+  const saved = (() => { try { return JSON.parse(localStorage.getItem(LS) || '{}'); } catch { return {}; } })();
 
   const CFG = {
     ai: {
-      key: saved.key || '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',
+      key: saved.key || 'PASTE_YOUR_REAL_KEY_HERE',
       model: saved.model || 'openai/gpt-oss-120b',
       url: 'https://api.groq.com/openai/v1/chat/completions',
       temperature: saved.temperature ?? 0.2,
@@ -43,14 +40,10 @@
       jitterPx: 6
     },
     autoStart: false,
-    dryRun: false,
-    explain: true,
-    sound: false
+    dryRun: false
   };
   const saveCfg = () => {
-    try { localStorage.setItem(LS, JSON.stringify({
-      key: CFG.ai.key, model: CFG.ai.model, temperature: CFG.ai.temperature
-    })); } catch {}
+    try { localStorage.setItem(LS, JSON.stringify({ key: CFG.ai.key, model: CFG.ai.model, temperature: CFG.ai.temperature })); } catch {}
   };
 
   const rand = (a, b) => Math.random() * (b - a) + a;
@@ -63,7 +56,7 @@
     tokensIn: 0, tokensOut: 0, requests: 0
   };
 
-  const log = (...a) => { if (!KILLED) console.log('%c[helper]', 'color:#e07b39;font-weight:bold', ...a); };
+  const log = (...a) => { if (!KILLED) console.log('%c[hw-helper]', 'color:#e07b39;font-weight:bold', ...a); };
 
   // ---- quiz DOM ----
   const getQuestionBlocks = () => [...document.querySelectorAll('lib-question')].filter(b => b.offsetParent !== null);
@@ -169,7 +162,6 @@
     return full;
   }
 
-  // JSON-robust variant — retries without response_format on 400
   async function groqJson(prompt, maxTokens) {
     async function attempt(useJson) {
       const body = {
@@ -204,7 +196,7 @@
     }
   }
 
-  // ---- auto loop ----
+  // ---- auto ----
   function buildAutoPrompt(question, choices, multi) {
     const list = choices.map((c, i) => `${i + 1}. ${getChoiceText(c)}`).join('\n');
     const inst = multi
@@ -296,6 +288,11 @@ Reply with JSON only.`;
 
   async function loop() {
     if (S.busy || KILLED) return;
+    if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') {
+      const k = prompt('Paste your Groq API key (starts with gsk_). It will be saved.');
+      if (k && k.trim()) { CFG.ai.key = k.trim(); saveCfg(); log('key saved'); render(); }
+      else { log('no key — aborting'); return; }
+    }
     S.busy = true; S.running = true; render();
     log('auto loop started');
     let guard = 0;
@@ -319,14 +316,13 @@ Reply with JSON only.`;
   }
   const stop = () => { S.running = false; render(); };
 
-  // ---- smart start ----
   function startSmart() {
     if (KILLED) return;
     if (S.running) { stop(); return; }
-    if (getQuestionBlocks().length) { log('quiz detected — auto'); loop(); return; }
-    log('no quiz — running Forge');
+    if (getQuestionBlocks().length) { log('quiz — auto'); loop(); return; }
+    log('no quiz — forge');
     if (window.__forge?.run) {
-      const t = document.querySelector('#__hh_panel .h-tab[data-tab="forge"]');
+      const t = document.querySelector('#__hh_panel .hh-tab[data-tab="forge"]');
       if (t) t.click();
       window.__forge.run();
     } else {
@@ -346,7 +342,7 @@ Reply with JSON only.`;
     try {
       await groqCall(
         [
-          { role: 'system', content: 'You are Homework Helper — direct, sharp, no filler. Answer the question actually asked.' },
+          { role: 'system', content: 'You are Homework Helper. Direct, sharp, no filler. Answer the question actually asked.' },
           ...S.chat.filter(m => !m.streaming).map(m => ({ role: m.role, content: m.content }))
         ],
         {
@@ -370,7 +366,7 @@ Reply with JSON only.`;
   }
 
   // ============================================================
-  // UI — compact orange-header, tabs
+  // UI
   // ============================================================
   const UI_ID = '__hh_ui';
   const PID = '__hh_panel';
@@ -380,194 +376,96 @@ Reply with JSON only.`;
     const el = document.createElement('div');
     el.id = UI_ID;
     el.innerHTML = `
-      <div id="${PID}" class="hh">
-        <div class="hh-hdr" id="${PID}_hdr">
-          <span>◆ Homework Helper</span>
-          <span class="hh-x" id="${PID}_x" title="Close & teardown">×</span>
+      <div id="${PID}" style="
+        position: fixed; top: 16px; right: 16px; z-index: 2147483647;
+        width: 320px; background: #1a1a1a; color: #f0f0f0;
+        border: 1px solid #e07b39; border-radius: 10px;
+        font: 12px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        box-shadow: 0 8px 24px rgba(0,0,0,.5); overflow: hidden;">
+
+        <div id="${PID}_hdr" style="
+          background:#e07b39;color:#1a1a1a;padding:8px 12px;font-weight:700;
+          display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
+          <span>Homework Helper</span>
+          <span id="${PID}_x" style="cursor:pointer;font-size:16px;line-height:1">×</span>
         </div>
-        <div class="hh-tabs" id="${PID}_tabs">
-          <button class="hh-tab hh-active" data-tab="auto">Auto</button>
-          <button class="hh-tab" data-tab="ask">Ask</button>
-          <button class="hh-tab" data-tab="forge">Forge</button>
-          <button class="hh-tab" data-tab="hist">History</button>
-          <button class="hh-tab" data-tab="cfg">⚙</button>
+
+        <div id="${PID}_tabs" style="display:flex;background:#141414;border-bottom:1px solid #262626;padding:4px 6px 0;gap:2px;">
+          <button class="hh-tab" data-tab="auto" style="flex:1;background:#1a1a1a;border:0;color:#e07b39;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:600;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid #e07b39;">Auto</button>
+          <button class="hh-tab" data-tab="ask" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">Ask</button>
+          <button class="hh-tab" data-tab="forge" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">Forge</button>
+          <button class="hh-tab" data-tab="hist" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">History</button>
+          <button class="hh-tab" data-tab="cfg" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">Settings</button>
         </div>
-        <div class="hh-body" id="${PID}_body">
+
+        <div style="padding:10px 12px;max-height:440px;overflow-y:auto;">
+
           <div class="hh-view" data-view="auto">
-            <div class="hh-row">
-              <button class="hh-btn hh-green" id="${PID}_toggle">Start</button>
-              <button class="hh-btn" id="${PID}_skip">Skip</button>
-              <button class="hh-btn" id="${PID}_explain">Explain</button>
+            <div style="display:flex;gap:6px;margin-bottom:8px">
+              <button id="${PID}_toggle" style="flex:1;padding:6px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Start</button>
+              <button id="${PID}_skip" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Skip</button>
+              <button id="${PID}_explain" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Explain</button>
             </div>
-            <div class="hh-meta">Status <span id="${PID}_status" class="hh-ok">idle</span> · Done <b id="${PID}_count">0</b> · Req <b id="${PID}_req">0</b></div>
-            <div class="hh-lbl">Last Q</div>
-            <div class="hh-box" id="${PID}_lq">—</div>
-            <div class="hh-lbl">Last A</div>
-            <div class="hh-box hh-ok" id="${PID}_la">—</div>
-            <div class="hh-lbl">Log</div>
-            <div class="hh-log" id="${PID}_log"></div>
+            <div style="font-size:11px;color:#aaa;margin-bottom:4px">Status: <span id="${PID}_status" style="color:#4caf50">idle</span> · Processed: <span id="${PID}_count">0</span> · Req: <span id="${PID}_req">0</span></div>
+            <div style="font-size:11px;color:#aaa;margin-bottom:2px">Last Q: <span id="${PID}_lq" style="color:#ddd">—</span></div>
+            <div style="font-size:11px;color:#aaa;margin-bottom:6px;word-break:break-word">Last A: <span id="${PID}_la" style="color:#4caf50">—</span></div>
+            <div id="${PID}_log" style="max-height:120px;overflow:auto;background:#0e0e0e;border-radius:6px;padding:6px;font:11px/1.4 ui-monospace,Menlo,monospace;color:#9ccc65;white-space:pre-wrap"></div>
           </div>
 
           <div class="hh-view" data-view="ask" style="display:none">
-            <div class="hh-chat" id="${PID}_chat"></div>
-            <div class="hh-chat-input">
-              <textarea id="${PID}_chatIn" placeholder="Ask anything… (Enter to send, Shift+Enter newline)"></textarea>
-              <button class="hh-btn hh-green" id="${PID}_chatSend">Send</button>
+            <div id="${PID}_chat" style="display:flex;flex-direction:column;gap:6px;padding-bottom:6px;max-height:300px;overflow-y:auto"></div>
+            <div style="display:flex;gap:6px;margin-top:6px">
+              <textarea id="${PID}_chatIn" placeholder="Ask anything… Enter to send" style="flex:1;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;resize:none;height:40px"></textarea>
+              <button id="${PID}_chatSend" style="padding:6px 10px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Send</button>
             </div>
           </div>
 
           <div class="hh-view" data-view="forge" style="display:none">
-            <div class="hh-lbl">Project context (saved)</div>
-            <textarea id="${PID}_fCtx" class="hh-input" style="height:50px" placeholder="One line or short paragraph about your project."></textarea>
-            <div class="hh-lbl">Voice sample (saved)</div>
-            <textarea id="${PID}_fStyle" class="hh-input" style="height:60px" placeholder="Paste a paragraph you wrote. Model matches your voice."></textarea>
-            <div class="hh-row" style="margin-top:6px">
-              <button class="hh-btn hh-green" id="${PID}_fGo">Forge</button>
-              <button class="hh-btn" id="${PID}_fCopy">Copy All</button>
-              <button class="hh-btn" id="${PID}_fDl">.txt</button>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Project context (saved)</div>
+            <textarea id="${PID}_fCtx" placeholder="One line about your project." style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px;resize:vertical;height:50px"></textarea>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Voice sample (saved)</div>
+            <textarea id="${PID}_fStyle" placeholder="Paste a paragraph you wrote." style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px;resize:vertical;height:60px"></textarea>
+            <div style="display:flex;gap:6px;margin-bottom:8px">
+              <button id="${PID}_fGo" style="flex:1;padding:6px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Forge</button>
+              <button id="${PID}_fCopy" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Copy All</button>
+              <button id="${PID}_fDl" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">.txt</button>
             </div>
-            <div class="hh-meta">Status <span id="${PID}_fStatus">idle</span></div>
-            <div class="hh-lbl">Scraped steps</div>
-            <div class="hh-log" id="${PID}_fSteps">—</div>
-            <div class="hh-lbl">Deliverables</div>
+            <div style="font-size:11px;color:#aaa;margin-bottom:4px">Status: <span id="${PID}_fStatus">idle</span></div>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Scraped steps</div>
+            <div id="${PID}_fSteps" style="background:#0a0a0a;border-radius:6px;padding:6px;font:10px/1.4 ui-monospace,Menlo,monospace;color:#9ccc65;max-height:130px;overflow-y:auto;white-space:pre-wrap">—</div>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Deliverables</div>
             <div id="${PID}_fOut" style="display:flex;flex-direction:column;gap:6px"></div>
           </div>
 
           <div class="hh-view" data-view="hist" style="display:none">
-            <div class="hh-row">
-              <button class="hh-btn" id="${PID}_hExport">Export</button>
-              <button class="hh-btn" id="${PID}_hClear">Clear</button>
+            <div style="display:flex;gap:6px;margin-bottom:8px">
+              <button id="${PID}_hExport" style="flex:1;padding:6px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Export</button>
+              <button id="${PID}_hClear" style="flex:1;padding:6px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Clear</button>
             </div>
-            <div class="hh-lbl">Quiz answers</div>
-            <div class="hh-hist" id="${PID}_hQuiz"></div>
-            <div class="hh-lbl">Forge runs</div>
-            <div class="hh-hist" id="${PID}_hForge"></div>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Quiz answers</div>
+            <div id="${PID}_hQuiz" style="display:flex;flex-direction:column;gap:5px;max-height:140px;overflow-y:auto"></div>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Forge runs</div>
+            <div id="${PID}_hForge" style="display:flex;flex-direction:column;gap:5px;max-height:140px;overflow-y:auto"></div>
           </div>
 
           <div class="hh-view" data-view="cfg" style="display:none">
-            <div class="hh-lbl">Model</div>
-            <input class="hh-input" id="${PID}_m">
-            <div class="hh-lbl">API key</div>
-            <input class="hh-input" id="${PID}_k" type="password">
-            <div class="hh-lbl">Temperature <b id="${PID}_tv"></b></div>
-            <input class="hh-input" id="${PID}_t" type="range" min="0" max="1" step="0.05">
-            <div class="hh-help">Ctrl+Shift+H toggle · × closes & tears down</div>
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Model</div>
+            <input id="${PID}_m" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">API key</div>
+            <input id="${PID}_k" type="password" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Temperature <span id="${PID}_tv" style="color:#e07b39"></span></div>
+            <input id="${PID}_t" type="range" min="0" max="1" step="0.05" style="width:100%;accent-color:#e07b39">
+            <div style="font-size:10px;color:#666;margin-top:8px;text-align:center">Ctrl+Shift+H toggle · × closes & tears down</div>
           </div>
         </div>
-        <div class="hh-foot">
+
+        <div style="display:flex;justify-content:space-between;padding:5px 12px;font:10px ui-monospace,monospace;color:#555;background:#0a0a0a;border-top:1px solid #1a1a1a">
           <span id="${PID}_fModel">—</span>
           <span id="${PID}_fTok">0 / 0</span>
         </div>
       </div>
     `;
     document.body.appendChild(el);
-
-    const css = document.createElement('style');
-    css.id = UI_ID + '_css';
-    css.textContent = `
-      #${PID}.hh {
-        position: fixed; top: 16px; right: 16px; z-index: 2147483647;
-        width: 330px; background: #1a1a1a; color: #f0f0f0;
-        border: 1px solid #e07b39; border-radius: 10px;
-        font: 12px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        box-shadow: 0 8px 24px rgba(0,0,0,.5); overflow: hidden;
-      }
-      #${PID} * { box-sizing: border-box; }
-      #${PID} .hh-hdr {
-        background: linear-gradient(135deg, #e07b39, #c96b2a);
-        color: #1a1a1a; padding: 8px 12px; font-weight: 700;
-        display: flex; justify-content: space-between; align-items: center; cursor: move; user-select: none;
-      }
-      #${PID} .hh-x { cursor: pointer; font-size: 16px; line-height: 1; opacity: .8; }
-      #${PID} .hh-x:hover { opacity: 1; }
-      #${PID} .hh-tabs {
-        display: flex; background: #141414; border-bottom: 1px solid #262626;
-        padding: 4px 6px 0; gap: 2px;
-      }
-      #${PID} .hh-tab {
-        flex: 1; background: transparent; border: 0; color: #8a8a8a;
-        padding: 7px 6px; cursor: pointer; font-size: 11px; font-weight: 500;
-        border-top-left-radius: 6px; border-top-right-radius: 6px;
-        border-bottom: 2px solid transparent;
-      }
-      #${PID} .hh-tab:hover { color: #d0d0d0; background: #1c1c1c; }
-      #${PID} .hh-active { color: #e07b39; background: #1a1a1a; border-bottom-color: #e07b39; }
-      #${PID} .hh-body { padding: 10px 12px; max-height: 440px; overflow-y: auto; }
-      #${PID} .hh-body::-webkit-scrollbar { width: 6px; }
-      #${PID} .hh-body::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 3px; }
-      #${PID} .hh-row { display: flex; gap: 6px; margin-bottom: 8px; }
-      #${PID} .hh-btn {
-        flex: 1; padding: 6px 10px; border: 0; border-radius: 6px;
-        background: #2a2a2a; color: #ddd; font-weight: 600; font-size: 11px; cursor: pointer;
-      }
-      #${PID} .hh-btn:hover { background: #333; }
-      #${PID} .hh-green { background: #2e7d32; color: #fff; }
-      #${PID} .hh-green:hover { background: #378f3a; }
-      #${PID} .hh-red { background: #c62828; color: #fff; }
-      #${PID} .hh-meta { font-size: 11px; color: #aaa; margin-bottom: 6px; }
-      #${PID} .hh-meta b { color: #e07b39; }
-      #${PID} .hh-ok { color: #6cc24a; }
-      #${PID} .hh-err { color: #ef5350; }
-      #${PID} .hh-lbl {
-        font-size: 10px; color: #666; text-transform: uppercase;
-        letter-spacing: .5px; margin: 8px 0 3px; font-weight: 700;
-      }
-      #${PID} .hh-box {
-        background: #0e0e0e; border-radius: 6px; padding: 6px 8px;
-        font-size: 11px; color: #ccc; max-height: 60px; overflow-y: auto; word-break: break-word;
-      }
-      #${PID} .hh-log {
-        background: #0a0a0a; border-radius: 6px; padding: 6px;
-        font: 10px/1.4 ui-monospace, Menlo, monospace; color: #9ccc65;
-        max-height: 130px; overflow-y: auto; white-space: pre-wrap;
-      }
-      #${PID} .hh-input {
-        width: 100%; background: #0e0e0e; color: #eee; border: 1px solid #2a2a2a;
-        border-radius: 6px; padding: 6px 9px; font: inherit; font-size: 11px;
-        margin-bottom: 4px; resize: vertical;
-      }
-      #${PID} .hh-input:focus { outline: none; border-color: #e07b39; }
-      #${PID} .hh-help { font-size: 10px; color: #666; margin-top: 8px; text-align: center; }
-      #${PID} .hh-chat { display: flex; flex-direction: column; gap: 6px; padding-bottom: 6px; max-height: 280px; overflow-y: auto; }
-      #${PID} .hh-msg { padding: 6px 10px; border-radius: 8px; font-size: 11px; line-height: 1.45; max-width: 92%; word-break: break-word; white-space: pre-wrap; }
-      #${PID} .hh-msg-u { align-self: flex-end; background: #2c3e50; color: #ecf0f1; }
-      #${PID} .hh-msg-a { align-self: flex-start; background: #1e1e1e; color: #ddd; border-left: 2px solid #e07b39; }
-      #${PID} .hh-msg-a.hh-streaming::after { content: '▋'; color: #e07b39; animation: hhb 1s steps(2) infinite; }
-      @keyframes hhb { 50% { opacity: 0; } }
-      #${PID} .hh-chat-input { display: flex; gap: 6px; margin-top: 6px; }
-      #${PID} .hh-chat-input textarea {
-        flex: 1; background: #0e0e0e; color: #eee; border: 1px solid #2a2a2a;
-        border-radius: 6px; padding: 6px 9px; font: inherit; font-size: 11px;
-        resize: none; height: 40px;
-      }
-      #${PID} .hh-chat-input textarea:focus { outline: none; border-color: #e07b39; }
-      #${PID} .hh-chat-input .hh-btn { flex: 0 0 auto; }
-      #${PID} .hh-hist { display: flex; flex-direction: column; gap: 5px; max-height: 150px; overflow-y: auto; }
-      #${PID} .hh-hist-item {
-        background: #0e0e0e; border-radius: 6px; padding: 6px 8px;
-        font-size: 11px; border-left: 2px solid #e07b39; color: #ccc;
-      }
-      #${PID} .hh-hist-item b { color: #e07b39; }
-      #${PID} .hh-foot {
-        display: flex; justify-content: space-between; padding: 5px 12px;
-        font: 10px ui-monospace, monospace; color: #555;
-        background: #0a0a0a; border-top: 1px solid #1a1a1a;
-      }
-      #${PID} .hh-deliv {
-        background: #0e0e0e; border-left: 3px solid #e07b39; border-radius: 6px;
-        padding: 8px; font-size: 11px;
-      }
-      #${PID} .hh-deliv-head {
-        display: flex; justify-content: space-between; align-items: center;
-        margin-bottom: 4px; gap: 6px;
-      }
-      #${PID} .hh-deliv-head b { color: #e07b39; font-size: 11px; flex: 1; word-break: break-word; }
-      #${PID} .hh-deliv-head .hh-btn { flex: 0 0 auto; padding: 3px 7px; font-size: 10px; }
-      #${PID} .hh-deliv-body {
-        color: #ddd; white-space: pre-wrap; max-height: 220px; overflow-y: auto; line-height: 1.5;
-      }
-    `;
-    document.head.appendChild(css);
 
     wireUI();
     render();
@@ -580,7 +478,13 @@ Reply with JSON only.`;
       btn.onclick = () => {
         if (KILLED) return;
         S.tab = btn.dataset.tab;
-        document.querySelectorAll('#' + PID + ' .hh-tab').forEach(b => b.classList.toggle('hh-active', b === btn));
+        document.querySelectorAll('#' + PID + ' .hh-tab').forEach(b => {
+          const active = b === btn;
+          b.style.background = active ? '#1a1a1a' : 'transparent';
+          b.style.color = active ? '#e07b39' : '#8a8a8a';
+          b.style.borderBottom = active ? '2px solid #e07b39' : '2px solid transparent';
+          b.style.fontWeight = active ? '600' : '500';
+        });
         document.querySelectorAll('#' + PID + ' .hh-view').forEach(v => {
           v.style.display = v.dataset.view === S.tab ? '' : 'none';
         });
@@ -597,11 +501,10 @@ Reply with JSON only.`;
     };
     $('_x').onclick = nuke;
 
-    // drag
     const hdr = $('_hdr'); const panel = document.getElementById(PID);
     let drag = null;
     hdr.addEventListener('mousedown', e => {
-      if (e.target.classList.contains('hh-x')) return;
+      if (e.target.id === PID + '_x') return;
       drag = { x: e.clientX, y: e.clientY, l: panel.offsetLeft, t: panel.offsetTop };
       e.preventDefault();
     }, SIG);
@@ -613,14 +516,12 @@ Reply with JSON only.`;
     }, SIG);
     document.addEventListener('mouseup', () => { drag = null; }, SIG);
 
-    // chat
     const ci = $('_chatIn');
     ci.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(ci.value); ci.value = ''; }
     }, SIG);
     $('_chatSend').onclick = () => { sendChat(ci.value); ci.value = ''; };
 
-    // history
     $('_hExport').onclick = () => {
       const blob = new Blob([JSON.stringify({ quiz: S.history, forge: window.__forge?.F?.history || [] }, null, 2)], { type: 'application/json' });
       const a = document.createElement('a');
@@ -635,7 +536,6 @@ Reply with JSON only.`;
       render();
     };
 
-    // settings
     const m = $('_m'); m.value = CFG.ai.model;
     m.oninput = () => { CFG.ai.model = m.value.trim(); saveCfg(); render(); };
     const k = $('_k'); k.value = CFG.ai.key;
@@ -644,7 +544,6 @@ Reply with JSON only.`;
     t.oninput = () => { CFG.ai.temperature = parseFloat(t.value); saveCfg(); $('_tv').textContent = CFG.ai.temperature.toFixed(2); };
     $('_tv').textContent = CFG.ai.temperature.toFixed(2);
 
-    // hotkeys
     document.addEventListener('keydown', e => {
       if (KILLED) return;
       if (e.ctrlKey && e.shiftKey && (e.key === 'H' || e.key === 'h')) {
@@ -655,7 +554,6 @@ Reply with JSON only.`;
     }, SIG);
   }
 
-  // ---- full teardown ----
   function nuke() {
     if (KILLED) return;
     KILLED = true;
@@ -665,52 +563,62 @@ Reply with JSON only.`;
     try { for (const h of killHooks) { try { h(); } catch {} } } catch {}
     try { window.__helperKillHooks = []; } catch {}
     try { if (window.__helperForgeBoot) { clearInterval(window.__helperForgeBoot); window.__helperForgeBoot = null; } } catch {}
-    try { document.getElementById(UI_ID + '_css')?.remove(); } catch {}
     try { document.getElementById(UI_ID)?.remove(); } catch {}
     try { if (window.__forge) delete window.__forge; } catch {}
     try { delete window.__cinder; } catch {}
-    console.log('%c[helper] closed — paste the loader again to reload.', 'color:#e07b39;font-weight:bold');
+    console.log('%c[hw-helper] closed — paste the loader again to reload.', 'color:#e07b39;font-weight:bold');
   }
 
-  // ---- render ----
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
   function renderLog() {
     const el = $('_log');
     if (!el) return;
     el.innerHTML = S.log.slice(-30).map(l => {
-      const cls = /err|fail/i.test(l) ? 'hh-err' : 'hh-ok';
-      return `<div class="${cls}">${esc(l)}</div>`;
+      const cls = /err|fail/i.test(l) ? 'color:#ef5350' : 'color:#9ccc65';
+      return `<div style="${cls}">${esc(l)}</div>`;
     }).join('');
     el.scrollTop = el.scrollHeight;
   }
   function renderChat() {
     const el = $('_chat');
     if (!el) return;
-    el.innerHTML = S.chat.map(m =>
-      `<div class="hh-msg hh-msg-${m.role === 'user' ? 'u' : 'a'}${m.streaming ? ' hh-streaming' : ''}">${esc(m.content)}</div>`
-    ).join('');
+    el.innerHTML = S.chat.map(m => {
+      const u = m.role === 'user';
+      const bg = u ? '#2c3e50' : '#1e1e1e';
+      const color = u ? '#ecf0f1' : '#ddd';
+      const align = u ? 'flex-end' : 'flex-start';
+      const border = u ? '' : 'border-left:2px solid #e07b39;';
+      const tail = m.streaming ? '<span style="color:#e07b39"> ▋</span>' : '';
+      return `<div style="align-self:${align};background:${bg};color:${color};${border}padding:6px 10px;border-radius:8px;font-size:11px;line-height:1.45;max-width:92%;word-break:break-word;white-space:pre-wrap">${esc(m.content)}${tail}</div>`;
+    }).join('');
     el.scrollTop = el.scrollHeight;
   }
   function renderHistory() {
     const q = $('_hQuiz');
     if (q) {
       q.innerHTML = S.history.length
-        ? S.history.slice().reverse().slice(0, 20).map(h => `<div class="hh-hist-item"><b>${esc(h.pickedText.join(' | ').slice(0, 90))}</b></div>`).join('')
-        : '<div class="hh-hist-item" style="opacity:.5">none yet</div>';
+        ? S.history.slice().reverse().slice(0, 20).map(h =>
+            `<div style="background:#0e0e0e;border-radius:6px;padding:6px 8px;font-size:11px;border-left:2px solid #e07b39;color:#ccc"><b style="color:#e07b39">${esc(h.pickedText.join(' | ').slice(0, 90))}</b></div>`
+          ).join('')
+        : '<div style="background:#0e0e0e;border-radius:6px;padding:6px 8px;font-size:11px;color:#666">none yet</div>';
     }
     const f = $('_hForge');
     if (f) {
       const H = window.__forge?.F?.history || [];
       f.innerHTML = H.length
-        ? H.slice(0, 20).map(h => `<div class="hh-hist-item"><b>${esc((h.title || 'assignment').slice(0, 60))}</b> — ${h.deliverables?.length || 0} deliverable(s)</div>`).join('')
-        : '<div class="hh-hist-item" style="opacity:.5">none yet</div>';
+        ? H.slice(0, 20).map(h =>
+            `<div style="background:#0e0e0e;border-radius:6px;padding:6px 8px;font-size:11px;border-left:2px solid #e07b39;color:#ccc"><b style="color:#e07b39">${esc((h.title || 'assignment').slice(0, 60))}</b> — ${h.deliverables?.length || 0}</div>`
+          ).join('')
+        : '<div style="background:#0e0e0e;border-radius:6px;padding:6px 8px;font-size:11px;color:#666">none yet</div>';
     }
   }
   function render() {
     if (KILLED || !document.getElementById(PID)) return;
     const st = $('_status');
-    if (st) { st.textContent = S.running ? 'running' : (S.busy ? 'stopping' : 'idle'); st.className = S.running ? 'hh-ok' : ''; }
+    if (st) { st.textContent = S.running ? 'running' : (S.busy ? 'stopping' : 'idle'); st.style.color = S.running ? '#4caf50' : '#aaa'; }
     const tg = $('_toggle');
-    if (tg) { tg.textContent = S.running ? 'Stop' : 'Start'; tg.className = 'hh-btn ' + (S.running ? 'hh-red' : 'hh-green'); }
+    if (tg) { tg.textContent = S.running ? 'Stop' : 'Start'; tg.style.background = S.running ? '#c62828' : '#2e7d32'; }
     if ($('_count')) $('_count').textContent = S.processed;
     if ($('_req')) $('_req').textContent = S.requests;
     if ($('_lq')) $('_lq').textContent = S.lastQuestion;
@@ -719,16 +627,12 @@ Reply with JSON only.`;
     if ($('_fTok')) $('_fTok').textContent = S.tokensIn + ' in / ' + S.tokensOut + ' out';
     renderLog(); renderChat(); renderHistory();
   }
-  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-  // expose some bits for forge module
   window.__cinder = {
-    CFG, S, log,
+    CFG, S, log, esc, render,
     groqCall, groqJson,
     isKilled: () => KILLED,
-    PID,
-    esc,
-    render
+    PID
   };
 
   ensureUI();
@@ -933,16 +837,16 @@ JSON only. No backticks. No commentary.`;
   function inject() {
     if (isDead()) return;
     const tabsBar = $('_tabs');
-    if (!tabsBar || tabsBar.querySelector('[data-tab="forge"]')) return;
-    // toggle handlers for the forge tab + its view already exist in the HTML
+    if (!tabsBar || tabsBar.dataset.forgeBound) return;
+    tabsBar.dataset.forgeBound = '1';
     const btn = tabsBar.querySelector('[data-tab="forge"]');
-    btn.addEventListener('click', () => { if (!isDead()) renderForge(); });
+    if (btn) btn.addEventListener('click', () => { if (!isDead()) renderForge(); });
 
     const ctx = $('_fCtx'); if (ctx) { ctx.value = Ctx.project; ctx.oninput = () => Ctx.saveProject(ctx.value); }
     const sty = $('_fStyle'); if (sty) { sty.value = Ctx.style; sty.oninput = () => Ctx.saveStyle(sty.value); }
-    $('_fGo').onclick = forge;
-    $('_fCopy').onclick = copyAll;
-    $('_fDl').onclick = downloadTxt;
+    const go = $('_fGo'); if (go) go.onclick = forge;
+    const cp = $('_fCopy'); if (cp) cp.onclick = copyAll;
+    const dl = $('_fDl'); if (dl) dl.onclick = downloadTxt;
 
     renderForge();
   }
@@ -958,8 +862,8 @@ JSON only. No backticks. No commentary.`;
       sEl.innerHTML = F.scrapedSteps.length
         ? F.scrapedSteps.map(s => {
             const head = esc(s.content.slice(0, 80).replace(/\n/g, ' '));
-            const bad = s.content.length < 200 ? ' style="color:#ef5350"' : '';
-            return `<div${bad}>• <b>${esc(s.label)}</b> — ${s.content.length} chars<br><span style="color:#666;font-size:9px">${head}…</span></div>`;
+            const col = s.content.length < 200 ? 'color:#ef5350' : 'color:#9ccc65';
+            return `<div style="${col}">• <b>${esc(s.label)}</b> — ${s.content.length} chars<br><span style="color:#666;font-size:9px">${head}…</span></div>`;
           }).join('')
         : '—';
     }
@@ -967,12 +871,12 @@ JSON only. No backticks. No commentary.`;
     if (!out) return;
     if (!F.deliverables.length) { out.innerHTML = ''; return; }
     out.innerHTML = F.deliverables.map((d, i) => `
-      <div class="hh-deliv">
-        <div class="hh-deliv-head">
-          <b>${esc(d.label)}</b>
-          <button class="hh-btn" data-copy="${i}">Copy</button>
+      <div style="background:#0e0e0e;border-left:3px solid #e07b39;border-radius:6px;padding:8px;font-size:11px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;gap:6px">
+          <b style="color:#e07b39;font-size:11px;flex:1;word-break:break-word">${esc(d.label)}</b>
+          <button data-copy="${i}" style="padding:3px 7px;border:0;border-radius:4px;background:#333;color:#ddd;cursor:pointer;font-size:10px">Copy</button>
         </div>
-        <div class="hh-deliv-body">${esc(d.answer)}</div>
+        <div style="color:#ddd;white-space:pre-wrap;max-height:220px;overflow-y:auto;line-height:1.5">${esc(d.answer)}</div>
       </div>
     `).join('');
     out.querySelectorAll('[data-copy]').forEach(b => {
@@ -1002,7 +906,6 @@ JSON only. No backticks. No commentary.`;
     a.click();
   }
 
-  // boot: wait for core panel
   const start = Date.now();
   window.__helperForgeBoot = setInterval(() => {
     if (isDead()) { clearInterval(window.__helperForgeBoot); window.__helperForgeBoot = null; return; }
