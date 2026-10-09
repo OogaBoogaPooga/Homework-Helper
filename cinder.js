@@ -781,7 +781,8 @@ Also ban reflective meta-tails at the end of a deliverable: "By stating these li
 
 === VOICE ===
 10th grade reading level. Plain words. Short sentences.
-Contractions: I'm, it's, doesn't, can't, won't.
+Contractions: I'm, it's, doesn't, can't, won't. 
+Short sentences. One idea per sentence. No sentence over 20 words unless it needs to be.
 Say "it", "my project", "my AI" — NEVER "the system", "the platform", "the AI application".
 No semicolons. No markdown headers. No **bold**. Plain prose.
 Bullets only if the step itself is a list prompt.
