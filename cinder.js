@@ -763,7 +763,11 @@ Only merge steps whose labels are literally identical.
 
 === CONTENT ===
 CRITICAL: Write the ACTUAL CONTENT, not a description of it.
-Never start with "In this section I...", "I list...", "I add...", "I note...", "I explain...", "I suggest...".
+Never use meta-language in any tense.
+- No past-tense narration: "I listed...", "I noted...", "I added...", "I described..."
+- No imperative narration: "List X", "Include Y", "Note Z", "Explain why...", "Add a section on..."
+- No future-should narration: "The introduction should state...", "The template must include..."
+If the assignment step itself is written as commands ("list X, include Y, note Z"), DO NOT pass those commands through. Execute them: write X as a sentence, write Y as a sentence, write Z as a sentence. The deliverable is the finished content, not the instruction set for producing it.
 If the step says "include X, Y, Z," just WRITE X, Y, Z as real sentences.
 Every deliverable references the student's project by actual name or clear descriptor.
 If a step has sub-questions, answer each inside that deliverable, in order.
