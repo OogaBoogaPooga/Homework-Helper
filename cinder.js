@@ -717,14 +717,42 @@ Reply with JSON only.`;
   }
 
   function findSubmitButton() {
-    const rx = /^(submit|turn in|turn this in|finish|complete|mark complete|save and submit)$/i;
-    return [...document.querySelectorAll('button, a, [role="button"]')]
+    const rx = /^(submit|turn in|turn this in|turn it in|submit assignment|submit for grading|submit your work|save and submit|save & submit|finish|finish assignment|complete|mark complete|submit and close|hand in|hand it in)\b/i;
+
+    const els = [...document.querySelectorAll(
+      'button, a, [role="button"], .mdc-button, [mat-flat-button], [mat-raised-button], [mat-stroked-button]'
+    )];
+
+    // 1. textContent match
+    for (const el of els) {
+      if (el.offsetParent === null) continue;
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+      if (el.closest('#__hh_ui')) continue;
+      const txt = (el.textContent || '').trim();
+      if (rx.test(txt)) return el;
+    }
+
+    // 2. aria-label match
+    for (const el of els) {
+      if (el.offsetParent === null) continue;
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+      if (el.closest('#__hh_ui')) continue;
+      const lbl = (el.getAttribute('aria-label') || '').trim();
+      if (rx.test(lbl)) return el;
+    }
+
+    // 3. primary-colored button inside a submission-looking section
+    const section = [...document.querySelectorAll('section, div, mat-card')]
       .find(el =>
         el.offsetParent !== null &&
-        !el.disabled &&
-        !el.closest('#__hh_ui') &&
-        rx.test((el.textContent || '').trim())
-      ) || null;
+        /(submission|turn\s*in|submit|dropbox)/i.test((el.textContent || '').slice(0, 300))
+      );
+    if (section) {
+      const btn = section.querySelector('button:not([disabled]), [role="button"]:not([disabled])');
+      if (btn && !btn.closest('#__hh_ui')) return btn;
+    }
+
+    return null;
   }
 
   async function openSubmissionBox() {
@@ -1077,26 +1105,81 @@ Answers:`;
       if (box) boxFilled = await fillSubmissionBox(box, answers);
     }
 
-    await sleep(600);
-    const submit = findSubmitButton();
-    if (submit) {
-      log('clicking submit:', (submit.textContent || '').trim());
-      humanClick(submit);
-      await sleep(2200);
+    await sleep(700);
 
-      const confirm = [...document.querySelectorAll('button, [role="button"]')]
-        .find(b => b.offsetParent !== null && !b.closest('#__hh_ui') && /^(yes|confirm|ok|submit|yes, submit|turn in)$/i.test((b.textContent || '').trim()));
-      if (confirm) {
-        log('confirming dialog');
-        humanClick(confirm);
-        await sleep(1800);
-      }
-    } else {
-      log('no submit button found — paste and submit manually');
+    let submit = findSubmitButton();
+    if (!submit) {
+      log('no submit button found — staying on page for manual submit');
+      S.lastAnswer = 'Submit button not found. Click it manually, then Start again.';
+      render();
+      S.running = false; S.busy = false; render();
+      return;
     }
+
+    log('clicking submit:', (submit.textContent || '').trim().slice(0, 40));
+    humanClick(submit);
+    await sleep(1800);
+
+    // handle confirmation dialog (mat-dialog, role=dialog, or modal overlay)
+    const dialogScopes = [
+      'mat-dialog-container', '[role="dialog"]', '.mat-mdc-dialog-surface',
+      '.mdc-dialog', '.cdk-overlay-pane', '[class*="modal"]'
+    ];
+    let confirmBtn = null;
+    for (const scope of dialogScopes) {
+      const root = document.querySelector(scope);
+      if (!root || root.offsetParent === null) continue;
+      confirmBtn = [...root.querySelectorAll('button, [role="button"]')]
+        .find(b => b.offsetParent !== null && !b.disabled &&
+          /^(yes|confirm|ok|yes,?\s*(submit|turn in)|turn in|submit)\b/i.test((b.textContent || '').trim()));
+      if (confirmBtn) break;
+    }
+
+    if (confirmBtn) {
+      log('confirming dialog:', (confirmBtn.textContent || '').trim().slice(0, 40));
+      humanClick(confirmBtn);
+      await sleep(2200);
+    } else {
+      // fallback: any yes/confirm/ok button anywhere visible
+      const anyConfirm = [...document.querySelectorAll('button, [role="button"]')]
+        .find(b => b.offsetParent !== null && !b.disabled && !b.closest('#__hh_ui') &&
+          /^(yes|confirm|ok|yes, submit|turn it in|turn in)$/i.test((b.textContent || '').trim()));
+      if (anyConfirm) {
+        log('confirming (fallback):', (anyConfirm.textContent || '').trim().slice(0, 40));
+        humanClick(anyConfirm);
+        await sleep(2200);
+      }
+    }
+
+    // verify submit actually took — retry once if button still enabled and visible
+    await sleep(900);
+    submit = findSubmitButton();
+    if (submit && !submit.disabled && submit.offsetParent !== null) {
+      log('submit still enabled — retrying click');
+      humanClick(submit);
+      await sleep(1800);
+      // one more dialog pass
+      const retryConfirm = [...document.querySelectorAll('button, [role="button"]')]
+        .find(b => b.offsetParent !== null && !b.disabled && !b.closest('#__hh_ui') &&
+          /^(yes|confirm|ok|yes, submit|turn it in|turn in)$/i.test((b.textContent || '').trim()));
+      if (retryConfirm) { humanClick(retryConfirm); await sleep(2000); }
+    }
+
+    // final check — if submit button is gone or disabled, we're done
+    await sleep(1200);
+    const stillThere = findSubmitButton();
+    const submitted = !stillThere || stillThere.disabled || stillThere.offsetParent === null;
 
     S.running = false; S.busy = false; render();
 
+    if (!submitted) {
+      log('submit did not land — staying on this page');
+      S.lastAnswer = 'Submit did not go through. Check manually, then Start again.';
+      render();
+      return;
+    }
+
+    log('submit confirmed — advancing');
     await sleep(randInt(2000, 4000));
     const nav = findNextAssignmentNav();
     if (nav) {
