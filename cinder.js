@@ -1,10 +1,9 @@
 // language: JavaScript, file: homework-helper.js, runtime: browser console on Buzz Angular
 // Homework Helper — Auto (quiz/flashcards/lessons) + Ask + Forge + History + Settings.
-// Groq backend. Simple UI. × fully tears down.
 
-// ============================================================
+
 // CORE
-// ============================================================
+
 (() => {
   'use strict';
 
