@@ -1,5 +1,5 @@
 // language: JavaScript, file: homework-helper.js, runtime: browser console on Buzz Angular
-// Homework Helper — Auto (quiz/flashcards/reading) + Ask (chat) + Forge (classwork) + History + Settings.
+// Homework Helper — Auto (quiz/flashcards/lessons) + Ask + Forge + History + Settings.
 // Groq backend. Simple UI. × fully tears down.
 
 // ============================================================
@@ -383,10 +383,11 @@ Reply with JSON only.`;
     }
   }
 
-  // ---- reading AFK ----
+  // ---- classification + completion detection ----
   function classifyPage() {
     if (getQuestionBlocks().length) return 'quiz';
     if (detectFlashcards()) return 'cards';
+    if (findMarkCompleteButton()) return 'lesson';
 
     const title = (
       (document.title || '') + ' ' +
@@ -394,20 +395,15 @@ Reply with JSON only.`;
     ).toLowerCase();
     const bodyHead = (document.body.innerText || '').slice(0, 2500).toLowerCase();
 
-    // assignment signals
     if (/\b(assignment|submit|dropbox|rubric)\b/i.test(title)) return 'assignment';
     if (/\b(submit (your|this|the) assignment|dropbox|rubric|grading criteria)\b/i.test(bodyHead)) return 'assignment';
 
-    // has real inputs → assignment-ish, don't AFK
     const inputs = [...document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"]')]
       .filter(t => t.offsetParent !== null);
     if (inputs.length) return 'assignment';
 
-    // lesson signals
     if (document.querySelector('video')) return 'lesson';
     if (/\b(lesson|video|lecture|watch|reading)\b/i.test(title)) return 'lesson';
-
-    // long passive text → treat as lesson reading
     if (bodyHead.length > 700 && !inputs.length) return 'lesson';
 
     return 'unknown';
@@ -457,10 +453,16 @@ Reply with JSON only.`;
       if (el) return el;
     }
 
-    const submit = [...document.querySelectorAll('button, a')].find(b =>
-      b.offsetParent !== null && /^(submit|finish|turn in|mark complete|continue|next)$/i.test((b.textContent || '').trim())
-    );
-    return submit || null;
+    return null;
+  }
+
+  function findMarkCompleteButton() {
+    return [...document.querySelectorAll('button, a, [role="button"]')]
+      .find(b =>
+        b.offsetParent !== null &&
+        !b.disabled &&
+        /^mark\s+(this\s+)?(activity|lesson|page|item)?\s*(as\s+)?complete$/i.test((b.textContent || '').trim())
+      ) || null;
   }
 
   function isAssignmentComplete() {
@@ -512,8 +514,58 @@ Reply with JSON only.`;
     });
   }
 
+  // ---- lesson chain ----
+  function looksLikeQuestions(text) {
+    if (!text) return false;
+    const q = (text.match(/\?/g) || []).length;
+    return q >= 2 || /\b(reflect on|answer the following|consider the following|discuss the following|respond to the following|answer these)\b/i.test(text);
+  }
+
+  function stashLessonContext() {
+    const body = (document.body.innerText || '').trim();
+    if (!body || body.length < 40) return;
+    const title = document.title || 'Lesson';
+    try {
+      localStorage.setItem('__hh_pending_lesson', JSON.stringify({
+        title, text: body.slice(0, 3000), ts: Date.now()
+      }));
+      log('stashed lesson context:', title);
+    } catch {}
+  }
+
   async function handlePassiveLesson() {
-    // If a video is present, mute it and play at 2x so any watch-time requirement counts.
+    // 1. Mark-complete button → click it.
+    const markBtn = findMarkCompleteButton();
+    if (markBtn) {
+      log('found Mark Complete button — clicking');
+      await sleep(randInt(800, 1500));
+      if (!S.running || KILLED) return false;
+      humanClick(markBtn);
+      await sleep(2200);
+      if (findCompletionIndicator() || isAssignmentComplete()) {
+        log('marked complete');
+        return true;
+      }
+      log('no badge after mark — assuming done');
+      return true;
+    }
+
+    // 2. Already complete?
+    if (findCompletionIndicator() || isAssignmentComplete()) {
+      log('already complete');
+      return true;
+    }
+
+    // 3. Instructions/reflection page → stash text, wait, advance.
+    const bodyText = document.body.innerText || '';
+    if (looksLikeQuestions(bodyText) && !document.querySelector('video')) {
+      stashLessonContext();
+      log('instructions page — advancing in 6s');
+      await sleep(6000);
+      return true;
+    }
+
+    // 4. Video present → mute, 2x, wait for checkmark.
     const vid = document.querySelector('video');
     if (vid) {
       try {
@@ -524,9 +576,7 @@ Reply with JSON only.`;
       } catch (e) { log('video play failed:', e.message); }
     }
 
-    // Already done?
-    if (findCompletionIndicator()) { log('checkmark already there'); return true; }
-
+    // 5. Wait for badge.
     log('waiting for checkmark…');
     const completion = await Promise.race([
       setupCompletionWatcher(),
@@ -534,7 +584,7 @@ Reply with JSON only.`;
         const iv = setInterval(() => { if (!S.running || KILLED) { clearInterval(iv); res(null); } }, 500);
         killHooks.push(() => clearInterval(iv));
       }),
-      (async () => { await sleep(10 * 60 * 1000); return null; })() // 10 min cap per lesson
+      (async () => { await sleep(10 * 60 * 1000); return null; })()
     ]);
 
     if (completion) {
@@ -566,7 +616,6 @@ Reply with JSON only.`;
       if (kind === 'assignment') { log('hit assignment — stopping chain. Run Forge.'); break; }
       if (kind === 'unknown') { log('unknown page — stopping chain'); break; }
 
-      // lesson — AFK
       await handlePassiveLesson();
       if (!S.running || KILLED) break;
 
@@ -1083,6 +1132,20 @@ Include exact button names and URLs. If an account is required, note it. Keep ea
 
   function buildPrompt(steps, ctx, style, fields, type) {
     const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 1800)}`).join('\n\n');
+
+    let pendingBlock = '';
+    try {
+      const raw = localStorage.getItem('__hh_pending_lesson');
+      if (raw) {
+        const p = JSON.parse(raw);
+        if (p && p.ts && (Date.now() - p.ts) < 30 * 60 * 1000) {
+          pendingBlock = `\n\nPRIOR LESSON CONTEXT (the questions on this page refer back to this — use it as source material):\n"""\n${p.title}\n---\n${p.text.slice(0, 2500)}\n"""\n`;
+          localStorage.removeItem('__hh_pending_lesson');
+          log('using stashed lesson context:', p.title);
+        }
+      }
+    } catch {}
+
     const ctxBlock = ctx && ctx.trim()
       ? `\n\nSTUDENT'S PROJECT — every deliverable is about THIS:\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
       : `\n\nNO PROJECT CONTEXT. If any step mentions "your project", "your AI", "your proposal", output exactly "[NEED PROJECT CONTEXT — paste in Forge tab]" for that deliverable. Do NOT invent.`;
@@ -1138,7 +1201,7 @@ Don't start two sentences the same way.
 60–120 words per deliverable. Shorter is better. Cut every sentence that doesn't add a fact, a reason, or an example. No padding, no restating, no transitions like "another key point" or "it's also worth noting". If a step can be answered in three tight sentences, do that.
 
 === ASSIGNMENT CONTENT ===
-${stepBlob}${ctxBlock}${styleBlock}${fieldsBlock}
+${stepBlob}${pendingBlock}${ctxBlock}${styleBlock}${fieldsBlock}
 
 Schema:
 {
