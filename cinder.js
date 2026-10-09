@@ -534,6 +534,11 @@ Reply with JSON only.`;
   }
 
   async function handlePassiveLesson() {
+    // Stash question context on ANY page that looks like it has questions, before we do anything else.
+    const bodyTextEarly = document.body.innerText || '';
+    const hasQuestions = looksLikeQuestions(bodyTextEarly) && !document.querySelector('video');
+    if (hasQuestions) stashLessonContext();
+
     const markBtn = findMarkCompleteButton();
     if (markBtn) {
       log('found Mark Complete button — clicking');
@@ -548,9 +553,7 @@ Reply with JSON only.`;
 
     if (findCompletionIndicator() || isAssignmentComplete()) { log('already complete'); return true; }
 
-    const bodyText = document.body.innerText || '';
-    if (looksLikeQuestions(bodyText) && !document.querySelector('video')) {
-      stashLessonContext();
+    if (hasQuestions) {
       log('instructions page — advancing in 6s');
       await sleep(6000);
       return true;
@@ -673,19 +676,70 @@ Reply with JSON only.`;
   }
 
   async function openSubmissionBox() {
-    let box = findSubmissionBox();
-    if (box) return box;
+    const isOurs = el => !!el.closest('#__hh_ui');
 
-    // Buzz sometimes hides the editor behind a "+" or a "Comments" area. Try clicking.
-    const plusEls = [...document.querySelectorAll('button, [role="button"], mat-icon, span')]
-      .filter(el => {
-        if (el.offsetParent === null) return false;
-        if (el.closest('#__hh_ui')) return false;
-        const t = (el.textContent || '').trim();
-        const lbl = (el.getAttribute('aria-label') || '').trim();
-        return /^\+$/.test(t) || /add comment|add reply|add note|start writing|write a comment/i.test(lbl + ' ' + t);
-      });
+    const scan = () => [...document.querySelectorAll('textarea, [contenteditable="true"]')]
+      .filter(el => el.offsetParent !== null && !isOurs(el))
+      .find(el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 100 && r.height > 20;
+      }) || null;
 
+    // Already visible?
+    let box = scan();
+    if (box) { log('comment box already visible'); return box; }
+
+    // Click every plausible "+" / add / comment opener and re-check.
+    const tryEls = [
+      ...document.querySelectorAll('button, [role="button"], mat-icon, .material-icons, span'),
+    ].filter(el => {
+      if (el.offsetParent === null) return false;
+      if (el.closest('#__hh_ui')) return false;
+      const t = (el.textContent || '').trim();
+      const lbl = (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '');
+      return /^\+$/.test(t)
+          || /^add$/i.test(t)
+          || /add comment|add reply|add note|add response|write a comment|new comment|post comment/i.test(lbl)
+          || /add comment|add reply|add note|start (writing|typing)/i.test(t);
+    });
+
+    log('trying', tryEls.length, 'potential openers');
+
+    for (const el of tryEls) {
+      if (KILLED) return null;
+      log('clicking opener:', (el.textContent || el.getAttribute('aria-label') || '').trim().slice(0, 40));
+      humanClick(el);
+      await sleep(1200);
+      box = scan();
+      if (box) { log('box appeared after click'); return box; }
+    }
+
+    // Last resort: click the "Comments" label itself, the whole submission section
+    const commentLabel = [...document.querySelectorAll('*')]
+      .find(el => el.children.length === 0 && el.offsetParent !== null && /^comments?$/i.test((el.textContent || '').trim()));
+    if (commentLabel) {
+      log('clicking Comments label');
+      humanClick(commentLabel);
+      await sleep(1200);
+      box = scan();
+      if (box) return box;
+
+      const container = commentLabel.closest('section, div, mat-card');
+      if (container) {
+        const btn = container.querySelector('button, [role="button"], mat-icon, .material-icons');
+        if (btn) {
+          log('clicking inside Comments section');
+          humanClick(btn);
+          await sleep(1200);
+          box = scan();
+          if (box) return box;
+        }
+      }
+    }
+
+    log('could not open comment box');
+    return null;
+  }
     for (const el of plusEls) {
       log('opening comment editor');
       humanClick(el);
@@ -725,10 +779,21 @@ Reply with JSON only.`;
         box.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
       }
-      // contenteditable
+      // contenteditable — use execCommand insertText, which pastes PLAIN TEXT only
+      // (no source formatting, no highlight, no rich-text styles)
       box.focus();
-      box.innerText = text;
-      box.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
+      try {
+        document.execCommand('selectAll', false, null);
+        document.execCommand('delete', false, null);
+      } catch {}
+      const ok = document.execCommand('insertText', false, text);
+      if (!ok) {
+        // fallback: set innerText directly, still plain
+        box.innerText = text;
+      }
+      box.dispatchEvent(new InputEvent('input', {
+        bubbles: true, cancelable: true, inputType: 'insertText', data: text
+      }));
       box.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     } catch (e) {
