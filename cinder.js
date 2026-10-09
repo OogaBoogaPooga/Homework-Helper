@@ -917,12 +917,20 @@ Write ONE answer per distinct question, in order, separated by blank lines. Firs
 
 LENGTH RULE (hard requirement):
 ${lengthLine}
+If no length was specified, keep it SHORT — 2-4 sentences per answer. Do not pad.
 
 VOICE:
 - Plain words. Short sentences. No semicolons. No markdown.
 - Contractions allowed: I'm, it's, doesn't, can't.
 - Say "it", "my project", "I" — never "the system" or "the AI application".
 - Answer the actual question. Don't restate it.
+
+NO FABRICATION:
+- Do NOT invent specific personal experiences, jobs, projects, classes, or events the student never mentioned.
+- If the question asks for personal examples, use ONLY things a normal high schooler would plausibly encounter day-to-day (Spotify playlists, YouTube videos, Instagram posts, Google Docs, school emails, photos on a phone, etc.). Do not name fake companies, fake projects, fake datasets, or fake activities.
+- When in doubt, keep examples generic ("a playlist app", "a school spreadsheet") rather than specific and made-up.
+- Do not stack 5-6 examples just to fill space. 2-3 short ones is plenty.
+- Never write like a business report or a resume. Write like an 11th grader just trying to get his homework done.
 
 SOURCE QUESTIONS:
 """
