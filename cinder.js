@@ -809,7 +809,39 @@ JSON only. No backticks. No commentary.`;
     if (!Array.isArray(o.deliverables)) throw new Error('no deliverables');
     return o;
   }
+  async function cleanDeliverables(deliverables, steps) {
+    if (!deliverables.length) return deliverables;
+    const list = deliverables.map((d, i) => `[${i}]\n${d.answer}`).join('\n\n---\n\n');
+    const prompt = `Rewrite each numbered passage below so it contains ONLY the actual content — no references to any document, section, template, or introduction.
 
+Rules:
+- Delete any sentence that names a section, document, or template ("In the X section...", "The Y section of my template...", "My introduction...").
+- Delete any opening that describes the passage ("Reviewing my project, I...", "Looking at my...", "This section covers...").
+- Delete any closing that describes the passage's effect ("By doing this, I...", "This shows readers...", "This balance helps...").
+- Keep every concrete fact, task, weakness, mitigation, and example.
+- Keep first-person voice, plain language, contractions.
+- Do not add anything new. Do not summarize. Just remove the meta.
+- If a passage is already clean, return it unchanged.
+
+Schema — return STRICT JSON only:
+{ "items": ["<rewritten passage 0>", "<rewritten passage 1>", ...] }
+
+Passages:
+${list}`;
+    try {
+      const raw = await C.groqJson(prompt, 4000);
+      let s = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+      const m = s.match(/\{[\s\S]*\}/);
+      if (!m) return deliverables;
+      const o = JSON.parse(m[0]);
+      if (!Array.isArray(o.items) || o.items.length !== deliverables.length) return deliverables;
+      return deliverables.map((d, i) => ({ ...d, answer: String(o.items[i] || d.answer).trim() }));
+    } catch (e) {
+      log('cleanup pass failed — using raw output:', e.message);
+      return deliverables;
+    }
+  }
+  
   async function forge() {
     if (F.running || isDead()) return;
     F.running = true; renderForge();
