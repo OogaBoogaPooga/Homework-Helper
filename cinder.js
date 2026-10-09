@@ -740,33 +740,6 @@ Reply with JSON only.`;
     log('could not open comment box');
     return null;
   }
-    for (const el of plusEls) {
-      log('opening comment editor');
-      humanClick(el);
-      await sleep(900);
-      box = findSubmissionBox();
-      if (box) return box;
-    }
-
-    // Fallback: click the "Comments" label
-    const commentLabel = [...document.querySelectorAll('*')]
-      .find(el => el.children.length === 0 && el.offsetParent !== null && /^comments?$/i.test((el.textContent || '').trim()));
-    if (commentLabel) {
-      const container = commentLabel.closest('section, div');
-      if (container) {
-        const target = container.querySelector('[role="button"], button, mat-icon, [class*="add"]');
-        if (target) {
-          log('clicking comment area');
-          humanClick(target);
-          await sleep(900);
-          box = findSubmissionBox();
-          if (box) return box;
-        }
-      }
-    }
-
-    return null;
-  }
 
   function fillSubmissionBox(box, text) {
     if (!box) return false;
