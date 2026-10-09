@@ -582,28 +582,6 @@ Reply with JSON only.`;
     render();
     log(`chain stopped after ${advanced} advances`);
   }
-    })();
-
-    const stopWatcher = new Promise(res => {
-      const iv = setInterval(() => { if (!S.running || KILLED) { clearInterval(iv); res(null); } }, 500);
-      killHooks.push(() => clearInterval(iv));
-    });
-
-    const completion = await Promise.race([completionPromise, stopWatcher]);
-
-    S.running = false;
-    await scrollLoop;
-    S.busy = false;
-    render();
-
-    if (completion) {
-      log('checkmark detected — advancing');
-      await sleep(2500);
-      const nav = findNextAssignmentNav();
-      if (nav) { log('→ next assignment'); humanClick(nav); }
-      else { log('no next-assignment nav found — click manually'); }
-    }
-  }
 
   // ---- smart start ----
   async function startSmart() {
