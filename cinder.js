@@ -40,10 +40,14 @@
       jitterPx: 6
     },
     autoStart: false,
-    dryRun: false
+    dryRun: false,
+    autoSubmitSec: saved.autoSubmitSec ?? 0
   };
   const saveCfg = () => {
-    try { localStorage.setItem(LS, JSON.stringify({ key: CFG.ai.key, model: CFG.ai.model, temperature: CFG.ai.temperature })); } catch {}
+    try { localStorage.setItem(LS, JSON.stringify({
+      key: CFG.ai.key, model: CFG.ai.model, temperature: CFG.ai.temperature,
+      autoSubmitSec: CFG.autoSubmitSec
+    })); } catch {}
   };
 
   const rand = (a, b) => Math.random() * (b - a) + a;
@@ -102,6 +106,55 @@
     el.dispatchEvent(new PointerEvent('pointerup', o));
     el.dispatchEvent(new MouseEvent('mouseup', o));
     el.dispatchEvent(new MouseEvent('click', o));
+  }
+
+  // ---- anti-detection ----
+  function driftMouse() {
+    try {
+      const x = randInt(20, window.innerWidth - 20);
+      const y = randInt(20, window.innerHeight - 20);
+      const o = { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window };
+      document.dispatchEvent(new PointerEvent('pointermove', o));
+      document.dispatchEvent(new MouseEvent('mousemove', o));
+    } catch {}
+  }
+
+  function driftScroll() {
+    try { window.scrollBy({ top: randInt(-40, 60), behavior: 'smooth' }); } catch {}
+  }
+
+  function tickHumanActivity() {
+    if (KILLED) return;
+    const r = Math.random();
+    if (r < 0.55) driftMouse();
+    else if (r < 0.75) { driftMouse(); driftScroll(); }
+    else if (r < 0.85) driftScroll();
+  }
+
+  function idlePause() {
+    if (Math.random() < 0.20) return sleep(randInt(2500, 7000));
+    return Promise.resolve();
+  }
+
+  function fireKeystrokes(el, text) {
+    try {
+      el.focus();
+      const n = Math.min(text.length, 25);
+      for (let i = 0; i < n; i++) {
+        const k = text[i];
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keypress', { key: k, bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { key: k, bubbles: true }));
+      }
+    } catch {}
+  }
+
+  function spoofFocus() {
+    try {
+      window.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
+      document.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    } catch {}
   }
 
   // ---- groq ----
@@ -376,7 +429,7 @@ Reply with JSON only.`;
     log(`card driver stopped after ${clicks} cards`);
 
     if (isAssignmentComplete() || findCompletionIndicator()) {
-      await sleep(2000);
+      await sleep(randInt(1500, 3200));
       const nav = findNextAssignmentNav();
       if (nav) { log('→ next assignment'); humanClick(nav); }
       else { log('no next-assignment nav — advance manually'); }
@@ -534,7 +587,6 @@ Reply with JSON only.`;
   }
 
   async function handlePassiveLesson() {
-    // Stash question context on ANY page that looks like it has questions, before we do anything else.
     const bodyTextEarly = document.body.innerText || '';
     const hasQuestions = looksLikeQuestions(bodyTextEarly) && !document.querySelector('video');
     if (hasQuestions) stashLessonContext();
@@ -579,7 +631,7 @@ Reply with JSON only.`;
       (async () => { await sleep(10 * 60 * 1000); return null; })()
     ]);
 
-    if (completion) { log('checkmark arrived'); await sleep(1500); return true; }
+    if (completion) { log('checkmark arrived'); await sleep(randInt(1800, 3500)); return true; }
     log('no checkmark after 10 min — moving on anyway');
     return false;
   }
@@ -620,7 +672,7 @@ Reply with JSON only.`;
       humanClick(nav);
       advanced++;
       log(`→ advanced to lesson ${advanced + 1}`);
-      await sleep(3000);
+      await sleep(randInt(2200, 4200));
     }
 
     S.running = false; S.busy = false;
@@ -629,7 +681,7 @@ Reply with JSON only.`;
   }
 
   // ============================================================
-  // FILL MODE — answer text boxes, confirm, submit
+  // FILL MODE
   // ============================================================
   function hasPendingLesson() {
     try {
@@ -685,11 +737,9 @@ Reply with JSON only.`;
         return r.width > 100 && r.height > 20;
       }) || null;
 
-    // Already visible?
     let box = scan();
     if (box) { log('comment box already visible'); return box; }
 
-    // Click every plausible "+" / add / comment opener and re-check.
     const tryEls = [
       ...document.querySelectorAll('button, [role="button"], mat-icon, .material-icons, span'),
     ].filter(el => {
@@ -714,7 +764,6 @@ Reply with JSON only.`;
       if (box) { log('box appeared after click'); return box; }
     }
 
-    // Last resort: click the "Comments" label itself, the whole submission section
     const commentLabel = [...document.querySelectorAll('*')]
       .find(el => el.children.length === 0 && el.offsetParent !== null && /^comments?$/i.test((el.textContent || '').trim()));
     if (commentLabel) {
@@ -741,7 +790,7 @@ Reply with JSON only.`;
     return null;
   }
 
-  function fillSubmissionBox(box, text) {
+  async function fillSubmissionBox(box, text) {
     if (!box) return false;
     try {
       if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
@@ -752,18 +801,15 @@ Reply with JSON only.`;
         box.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
       }
-      // contenteditable — use execCommand insertText, which pastes PLAIN TEXT only
-      // (no source formatting, no highlight, no rich-text styles)
       box.focus();
       try {
         document.execCommand('selectAll', false, null);
         document.execCommand('delete', false, null);
       } catch {}
+      fireKeystrokes(box, text.slice(0, 40));
+      await sleep(randInt(180, 520));
       const ok = document.execCommand('insertText', false, text);
-      if (!ok) {
-        // fallback: set innerText directly, still plain
-        box.innerText = text;
-      }
+      if (!ok) box.innerText = text;
       box.dispatchEvent(new InputEvent('input', {
         bubbles: true, cancelable: true, inputType: 'insertText', data: text
       }));
@@ -775,22 +821,135 @@ Reply with JSON only.`;
     }
   }
 
-  async function generateAnswersForLesson(lesson) {
-    const prompt = `You are a real student answering reflection questions. Below is the source material (a lesson page with questions), followed by the assignment page.
+  // ---- length parsing ----
+  function parseLengthRequirement(text) {
+    const t = (text || '').toLowerCase();
 
-Write ONE answer per question, in order. Plain prose, first person, 60-120 words each. No headers. No bullet lists. No meta-commentary ("In this response I..." etc). Just the answer text.
+    let m = t.match(/at\s+least\s+(\d+)\s+words?/);
+    if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
 
-If there are 3 questions, write 3 paragraphs separated by blank lines. Do NOT include the question text — just the answers.
+    m = t.match(/minimum\s+(?:of\s+)?(\d+)\s+words?/);
+    if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
 
-LESSON SOURCE:
+    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+words?/);
+    if (m) return { kind: 'words', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
+
+    m = t.match(/no\s+more\s+than\s+(\d+)\s+words?/);
+    if (m) return { kind: 'words', min: null, max: parseInt(m[1], 10), raw: m[0] };
+
+    m = t.match(/(\d+)\s+words?\s*(?:each|per|minimum|max|maximum)/);
+    if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
+
+    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+sentences?/);
+    if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
+
+    m = t.match(/at\s+least\s+(\d+)\s+sentences?/);
+    if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: null, raw: m[0] };
+
+    m = t.match(/(\d+)\s+sentences?\s*(?:each|per|minimum)/);
+    if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: null, raw: m[0] };
+
+    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+paragraphs?/);
+    if (m) return { kind: 'paragraphs', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
+
+    m = t.match(/(\d+)\s+paragraphs?/);
+    if (m) return { kind: 'paragraphs', min: parseInt(m[1], 10), max: parseInt(m[1], 10), raw: m[0] };
+
+    return null;
+  }
+
+  function describeLength(req) {
+    if (!req) return '';
+    if (req.kind === 'words') {
+      if (req.min && req.max) return `Each answer must be between ${req.min} and ${req.max} words. Aim for ${Math.round((req.min + req.max) / 2)} words.`;
+      if (req.min) return `Each answer must be AT LEAST ${req.min} words. Do not go under this.`;
+      if (req.max) return `Each answer must be under ${req.max} words.`;
+    }
+    if (req.kind === 'sentences') {
+      if (req.min && req.max) return `Each answer must be ${req.min} to ${req.max} sentences long.`;
+      if (req.min) return `Each answer must be at least ${req.min} sentences long.`;
+    }
+    if (req.kind === 'paragraphs') {
+      if (req.min && req.max) return `Each answer must be ${req.min} to ${req.max} paragraphs.`;
+      if (req.min) return `Each answer must be at least ${req.min} paragraph(s).`;
+    }
+    return '';
+  }
+
+  async function generateAnswersForLesson(lesson, submissionText) {
+    const lengthReq = parseLengthRequirement(lesson.text + '\n' + (submissionText || ''));
+    const lengthLine = describeLength(lengthReq) || 'Each answer should be roughly 60-120 words — short and to the point.';
+    if (lengthReq) log('detected length requirement:', lengthReq.raw);
+
+    const makePrompt = (sourceText, short) => `You are a real student answering reflection questions for a class assignment.
+
+You will get the SOURCE material (the questions the assignment wants answered) and optional ASSIGNMENT CONTEXT (the submission page text).
+
+Write ONE answer per distinct question, in order, separated by blank lines. First person, plain prose, no headers, no bullet lists, no meta-commentary ("In this response I will...").
+
+LENGTH RULE (hard requirement):
+${lengthLine}
+
+VOICE:
+- Plain words. Short sentences. No semicolons. No markdown.
+- Contractions allowed: I'm, it's, doesn't, can't.
+- Say "it", "my project", "I" — never "the system" or "the AI application".
+- Answer the actual question. Don't restate it.
+
+SOURCE QUESTIONS:
 """
 ${lesson.title}
-${lesson.text.slice(0, 2800)}
+${sourceText}
 """
+${submissionText && !short ? `\nASSIGNMENT CONTEXT:\n"""\n${submissionText.slice(0, 800)}\n"""\n` : ''}
+Return plain text only — just the answers, separated by blank lines. No JSON, no intro line, no headers.`;
 
-Return plain text only — no JSON, no markdown, no intro line.`;
-    const raw = await groqCall([{ role: 'user', content: prompt }], { maxTokens: 1500, temperature: 0.4 });
-    return (raw || '').trim();
+    const tryOnce = async (source, short, temp, tokens) => {
+      try {
+        const raw = await groqCall(
+          [{ role: 'user', content: makePrompt(source, short) }],
+          { maxTokens: tokens, temperature: temp }
+        );
+        return (raw || '').trim();
+      } catch (e) {
+        log('fill attempt failed:', e.message);
+        return '';
+      }
+    };
+
+    let raw = await tryOnce(lesson.text.slice(0, 2800), false, 0.4, 6000);
+    if (raw) return raw;
+
+    log('attempt 1 empty — retrying with shorter context');
+    raw = await tryOnce(lesson.text.slice(0, 1400), true, 0.3, 6000);
+    if (raw) return raw;
+
+    log('attempt 2 empty — trying minimal prompt');
+    const minimal = `Write a student reflection answering the questions below. ${lengthLine} Plain first-person prose, no headers, one answer per question separated by blank lines.
+
+Questions:
+${lesson.text.slice(0, 1200)}
+
+Answers:`;
+    try {
+      raw = await groqCall([{ role: 'user', content: minimal }], { maxTokens: 6000, temperature: 0.5 });
+      raw = (raw || '').trim();
+    } catch (e) { log('attempt 3 failed:', e.message); }
+    if (raw) return raw;
+
+    if (CFG.ai.model !== 'llama-3.3-70b-versatile') {
+      log('all attempts empty — trying llama-3.3-70b-versatile');
+      const prev = CFG.ai.model;
+      CFG.ai.model = 'llama-3.3-70b-versatile';
+      try {
+        raw = await groqCall([{ role: 'user', content: minimal }], { maxTokens: 6000, temperature: 0.4 });
+        raw = (raw || '').trim();
+      } catch (e) { log('llama fallback failed:', e.message); }
+      if (raw) return raw;
+      CFG.ai.model = prev;
+    }
+
+    return '';
   }
 
   function showFillPopup(lesson, answers, boxFound) {
@@ -806,6 +965,8 @@ Return plain text only — no JSON, no markdown, no intro line.`;
         box-shadow: 0 12px 60px rgba(0,0,0,.8);
         overflow: hidden;
       `;
+      const wordCount = (answers.match(/\S+/g) || []).length;
+      const autoSubmit = CFG.autoSubmitSec > 0;
       el.innerHTML = `
         <div style="background:#e07b39;color:#1a1a1a;padding:10px 16px;font-weight:700;display:flex;justify-content:space-between;align-items:center;">
           <span>Review before submit</span>
@@ -813,11 +974,11 @@ Return plain text only — no JSON, no markdown, no intro line.`;
         </div>
         <div style="padding:14px 16px;max-height:60vh;overflow-y:auto;">
           <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:700;">Source questions</div>
-          <div style="background:#0e0e0e;border-radius:6px;padding:10px;font-size:12px;color:#bbb;white-space:pre-wrap;max-height:160px;overflow-y:auto;margin-bottom:14px;">${(lesson.title + '\n\n' + lesson.text.slice(0, 1200)).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>
-          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:700;">Generated answers ${boxFound ? '(will be pasted into the comment box)' : '(box not found — you will need to paste manually)'}</div>
+          <div style="background:#0e0e0e;border-radius:6px;padding:10px;font-size:12px;color:#bbb;white-space:pre-wrap;max-height:140px;overflow-y:auto;margin-bottom:14px;">${(lesson.title + '\n\n' + lesson.text.slice(0, 1000)).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>
+          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:700;">Generated answers (${wordCount} words) ${boxFound ? '· pasted into box' : '· box not found'}</div>
           <div style="background:#0e0e0e;border-left:3px solid #e07b39;border-radius:6px;padding:10px;font-size:13px;color:#eee;white-space:pre-wrap;max-height:260px;overflow-y:auto;">${answers.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>
-          <div style="margin-top:12px;font-size:11px;color:#888;">
-            Confirm to paste (if needed) and click Submit / Turn in. Cancel to stop and paste manually.
+          <div style="margin-top:12px;font-size:11px;color:#888;" id="__hh_fill_hint">
+            ${autoSubmit ? `Auto-submitting in <b id="__hh_fill_count">${CFG.autoSubmitSec}</b>s — click Confirm to submit now, or Cancel to stop.` : 'Confirm to paste (if needed) and click Submit / Turn in. Cancel to stop.'}
           </div>
         </div>
         <div style="padding:12px 16px;background:#141414;border-top:1px solid #262626;display:flex;gap:8px;">
@@ -828,8 +989,13 @@ Return plain text only — no JSON, no markdown, no intro line.`;
       `;
       document.body.appendChild(el);
 
+      let resolved = false;
+      let autoIv = null;
       const cleanup = (result) => {
-        el.remove();
+        if (resolved) return;
+        resolved = true;
+        if (autoIv) clearInterval(autoIv);
+        try { el.remove(); } catch {}
         resolve(result);
       };
 
@@ -840,6 +1006,17 @@ Return plain text only — no JSON, no markdown, no intro line.`;
         cleanup('manual');
       };
       document.getElementById('__hh_fill_confirm').onclick = () => cleanup('confirm');
+
+      if (autoSubmit) {
+        let left = CFG.autoSubmitSec;
+        const countEl = document.getElementById('__hh_fill_count');
+        autoIv = setInterval(() => {
+          left--;
+          if (countEl) countEl.textContent = String(Math.max(left, 0));
+          if (left <= 0) { clearInterval(autoIv); autoIv = null; cleanup('confirm'); }
+        }, 1000);
+        killHooks.push(() => { if (autoIv) { clearInterval(autoIv); autoIv = null; } });
+      }
     });
   }
 
@@ -857,31 +1034,36 @@ Return plain text only — no JSON, no markdown, no intro line.`;
     S.running = true; S.busy = true; render();
     log('fill mode — generating answers for', lesson.title);
 
+    const submissionText = document.body.innerText || '';
+
     let answers = '';
     try {
-      answers = await generateAnswersForLesson(lesson);
+      answers = await generateAnswersForLesson(lesson, submissionText);
     } catch (e) {
       log('answer generation failed:', e.message);
       S.running = false; S.busy = false; render();
       return;
     }
-    if (!answers) { log('empty answer'); S.running = false; S.busy = false; render(); return; }
-    log('answers ready —', answers.length, 'chars');
+    if (!answers) {
+      log('empty answer after all attempts — check key + model in Settings');
+      S.lastAnswer = 'Fill failed: model returned empty. Try Settings → Model.';
+      render();
+      S.running = false; S.busy = false; render();
+      return;
+    }
+    log('answers ready —', answers.length, 'chars ·', (answers.match(/\S+/g) || []).length, 'words');
 
-    // Try to open/find the submission box and fill it BEFORE showing popup
     let box = await openSubmissionBox();
     let boxFilled = false;
     if (box) {
-      boxFilled = fillSubmissionBox(box, answers);
+      boxFilled = await fillSubmissionBox(box, answers);
       log(boxFilled ? 'comment box filled' : 'could not fill comment box');
     } else {
       log('no comment box found — you will need to paste manually');
     }
 
-    // Show confirmation popup
     const choice = await showFillPopup(lesson, answers, boxFilled);
 
-    // Clear the stash — used
     try { localStorage.removeItem('__hh_pending_lesson'); } catch {}
 
     if (choice !== 'confirm') {
@@ -890,13 +1072,11 @@ Return plain text only — no JSON, no markdown, no intro line.`;
       return;
     }
 
-    // If box wasn't found during the first pass, try again
     if (!boxFilled) {
       box = await openSubmissionBox();
-      if (box) boxFilled = fillSubmissionBox(box, answers);
+      if (box) boxFilled = await fillSubmissionBox(box, answers);
     }
 
-    // Click Submit
     await sleep(600);
     const submit = findSubmitButton();
     if (submit) {
@@ -904,7 +1084,6 @@ Return plain text only — no JSON, no markdown, no intro line.`;
       humanClick(submit);
       await sleep(2200);
 
-      // Buzz sometimes shows a confirmation dialog — click "yes/confirm/ok"
       const confirm = [...document.querySelectorAll('button, [role="button"]')]
         .find(b => b.offsetParent !== null && !b.closest('#__hh_ui') && /^(yes|confirm|ok|submit|yes, submit|turn in)$/i.test((b.textContent || '').trim()));
       if (confirm) {
@@ -918,35 +1097,102 @@ Return plain text only — no JSON, no markdown, no intro line.`;
 
     S.running = false; S.busy = false; render();
 
-    // Advance to next page
-    await sleep(2500);
+    await sleep(randInt(2000, 4000));
     const nav = findNextAssignmentNav();
     if (nav) {
       log('→ advancing');
       humanClick(nav);
       await sleep(3000);
 
-      // Re-classify the new page and continue if it's a lesson
       const nextKind = classifyPage();
       log('next page:', nextKind);
-      if (nextKind === 'lesson') {
-        log('resuming lesson chain');
-        await runLessonChain();
+      if (nextKind === 'lesson') { log('resuming lesson chain'); await runLessonChain(); }
+      else if (nextKind === 'quiz') { log('resuming quiz auto'); await loop(); }
+      else if (nextKind === 'cards') { log('resuming card driver'); await runCards(); }
+      else if (nextKind === 'assignment') {
+        if (hasPendingLesson() && !needsFileUpload()) { log('resuming fill mode'); await runFillAssignment(); }
+        else if (window.__forge?.run) { log('resuming forge'); window.__forge.run(); }
       }
     } else {
       log('no next nav — click manually');
     }
   }
 
+  // ---- continuous mode ----
+  let __lastUrl = location.href;
+  let __lastBodyLen = 0;
+  let __continuous = false;
+  let __continuousGuard = 0;
+
+  async function continuousTick() {
+    if (KILLED || !__continuous) return;
+    if (S.running) return;
+    if (__continuousGuard++ > 200) { log('continuous: guard hit, stopping'); __continuous = false; return; }
+
+    const url = location.href;
+    const bodyLen = (document.body.innerText || '').length;
+    const urlChanged = url !== __lastUrl;
+    const bodyChanged = Math.abs(bodyLen - __lastBodyLen) > 200;
+    if (!urlChanged && !bodyChanged) return;
+
+    __lastUrl = url;
+    __lastBodyLen = bodyLen;
+
+    await sleep(randInt(900, 2600));
+    if (KILLED || !__continuous) return;
+    await idlePause();
+    if (KILLED || !__continuous) return;
+
+    const kind = classifyPage();
+    log('continuous → new page detected:', kind);
+
+    if (kind === 'unknown') { log('continuous: unknown page, stopping'); __continuous = false; render(); return; }
+
+    if (kind === 'lesson' && (findCompletionIndicator() || isAssignmentComplete())) {
+      log('continuous: lesson already done, advancing');
+      const nav = findNextAssignmentNav();
+      if (nav) { humanClick(nav); await sleep(randInt(2200, 4000)); return; }
+    }
+
+    if (kind === 'quiz') { await loop(); return; }
+    if (kind === 'cards') { await runCards(); return; }
+    if (kind === 'lesson') { await runLessonChain(); return; }
+    if (kind === 'assignment') {
+      if (hasPendingLesson() && !needsFileUpload()) { await runFillAssignment(); return; }
+      if (window.__forge?.run) {
+        const t = document.querySelector('#__hh_panel .hh-tab[data-tab="forge"]');
+        if (t) t.click();
+        window.__forge.run();
+      }
+      return;
+    }
+  }
+
+  function startContinuous() {
+    __continuous = true;
+    __continuousGuard = 0;
+    __lastUrl = location.href;
+    __lastBodyLen = (document.body.innerText || '').length;
+    log('continuous mode ON');
+    render();
+  }
+  function stopContinuous() {
+    __continuous = false;
+    log('continuous mode OFF');
+    render();
+  }
+
   // ---- smart start ----
   async function startSmart() {
     if (KILLED) return;
-    if (S.running) { stop(); return; }
+    if (S.running || __continuous) { stop(); stopContinuous(); return; }
 
     if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE' && classifyPage() === 'assignment') {
       const k = prompt('Paste your Groq API key (starts with gsk_). It will be saved.');
       if (k && k.trim()) { CFG.ai.key = k.trim(); saveCfg(); log('key saved'); }
     }
+
+    startContinuous();
 
     const kind = classifyPage();
     log('startSmart →', kind);
@@ -1110,6 +1356,9 @@ Return plain text only — no JSON, no markdown, no intro line.`;
             <input id="${PID}_k" type="password" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Temperature <span id="${PID}_tv" style="color:#e07b39"></span></div>
             <input id="${PID}_t" type="range" min="0" max="1" step="0.05" style="width:100%;accent-color:#e07b39">
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Auto-submit timer (0 = off)</div>
+            <input id="${PID}_auto" type="number" min="0" max="120" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
+            <div style="font-size:10px;color:#666;margin-top:4px;line-height:1.5">If set, the fill popup auto-confirms after N seconds. 0 = wait for you.</div>
             <div style="font-size:10px;color:#666;margin-top:8px;text-align:center">Ctrl+Shift+H toggle · × closes & tears down</div>
           </div>
         </div>
@@ -1198,6 +1447,8 @@ Return plain text only — no JSON, no markdown, no intro line.`;
     const t = $('_t'); t.value = CFG.ai.temperature;
     t.oninput = () => { CFG.ai.temperature = parseFloat(t.value); saveCfg(); $('_tv').textContent = CFG.ai.temperature.toFixed(2); };
     $('_tv').textContent = CFG.ai.temperature.toFixed(2);
+    const auto = $('_auto'); auto.value = CFG.autoSubmitSec;
+    auto.oninput = () => { CFG.autoSubmitSec = parseInt(auto.value, 10) || 0; saveCfg(); };
 
     document.addEventListener('keydown', e => {
       if (KILLED) return;
@@ -1212,7 +1463,7 @@ Return plain text only — no JSON, no markdown, no intro line.`;
   function nuke() {
     if (KILLED) return;
     KILLED = true;
-    try { S.running = false; S.busy = false; } catch {}
+    try { S.running = false; S.busy = false; __continuous = false; } catch {}
     try { ABORT.abort(); } catch {}
     try { clrAll(); } catch {}
     try { for (const h of killHooks) { try { h(); } catch {} } } catch {}
@@ -1272,9 +1523,16 @@ Return plain text only — no JSON, no markdown, no intro line.`;
   function render() {
     if (KILLED || !document.getElementById(PID)) return;
     const st = $('_status');
-    if (st) { st.textContent = S.running ? 'running' : (S.busy ? 'stopping' : 'idle'); st.style.color = S.running ? '#4caf50' : '#aaa'; }
+    if (st) {
+      st.textContent = S.running ? 'running' : (__continuous ? 'continuous' : (S.busy ? 'stopping' : 'idle'));
+      st.style.color = (S.running || __continuous) ? '#4caf50' : '#aaa';
+    }
     const tg = $('_toggle');
-    if (tg) { tg.textContent = S.running ? 'Stop' : 'Start'; tg.style.background = S.running ? '#c62828' : '#2e7d32'; }
+    if (tg) {
+      const active = S.running || __continuous;
+      tg.textContent = active ? 'Stop' : 'Start';
+      tg.style.background = active ? '#c62828' : '#2e7d32';
+    }
     if ($('_count')) $('_count').textContent = S.processed;
     if ($('_req')) $('_req').textContent = S.requests;
     if ($('_lq')) $('_lq').textContent = S.lastQuestion;
@@ -1293,6 +1551,20 @@ Return plain text only — no JSON, no markdown, no intro line.`;
 
   ensureUI();
   log('helper ready · ' + CFG.ai.model);
+
+  // jittered continuous-mode ticker
+  (function tick() {
+    if (KILLED) return;
+    setTimeout(async () => {
+      try { tickHumanActivity(); await continuousTick(); }
+      catch (e) { log('continuous err:', e.message); }
+      tick();
+    }, randInt(2200, 5200));
+  })();
+
+  spoofFocus();
+  setInterval(spoofFocus, 30000);
+
   if (CFG.autoStart) loop();
 })();
 
@@ -1336,7 +1608,7 @@ Return plain text only — no JSON, no markdown, no intro line.`;
 
   function detectType(text) {
     const t = (text || '').toLowerCase();
-    if (/\b(canva|canva\.com)\b/.test(t)) return 'canva';
+    if (/\bcanva\.com\b/i.test(t) || /\buse\s+canva\b/i.test(t) || /\bopen\s+canva\b/i.test(t) || /\bcreate.*?\bin\s+canva\b/i.test(t) || /\bcanva\s+(template|design|slide)/i.test(t)) return 'canva';
     if (/\b(slide|slides|presentation|powerpoint|google slides|deck)\b/.test(t)) return 'presentation';
     if (/\b(flashcard|flash card|quizlet|anki|term and definition|vocab card)\b/.test(t)) return 'flashcards';
     if (/\b(record a video|loom|screencastify|voiceover|voice over|narrate)\b/.test(t)) return 'video';
@@ -1345,7 +1617,7 @@ Return plain text only — no JSON, no markdown, no intro line.`;
   }
 
   const TYPE_INSTRUCTIONS = {
-    written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable. No bullets unless the step itself is a list prompt.`,
+    written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable unless a length is specified. No bullets unless the step itself is a list prompt.`,
     presentation: `OUTPUT SHAPE: Slide-by-slide. For each deliverable:
 Slide 1: <title>
 - bullet
@@ -1501,6 +1773,10 @@ If a step has sub-questions, answer each inside that deliverable, in order.
 If the assignment step itself says "in this section include X, Y, Z" or "your introduction should explain X," that is NOT permission to describe the section. Write X, Y, Z and the explanation of X directly.
 Also ban reflective meta-tails at the end of a deliverable: "By stating these limits...", "Readers will see...", "This helps the project...". End on the actual point, not on a sentence describing the effect of the writing.
 
+=== LENGTH ===
+If any step or prompt includes a length requirement (e.g. "100 words", "3-5 sentences", "at least 200 words"), obey it EXACTLY. Match the count. Do not fall short.
+If no length is specified, keep each deliverable to 60-120 words.
+
 === VOICE ===
 10th grade reading level. Plain words. Short sentences.
 Contractions: I'm, it's, doesn't, can't, won't.
@@ -1510,7 +1786,6 @@ No semicolons. No markdown headers. No **bold**. Plain prose.
 Bullets only if the step itself is a list prompt.
 Ban: furthermore, moreover, additionally, in conclusion, plays a crucial role, leverages, facilitates, underscores, optimal, robust.
 Don't start two sentences the same way.
-60–120 words per deliverable. Shorter is better. Cut every sentence that doesn't add a fact, a reason, or an example. No padding, no restating, no transitions like "another key point" or "it's also worth noting". If a step can be answered in three tight sentences, do that.
 
 === ASSIGNMENT CONTENT ===
 ${stepBlob}${pendingBlock}${ctxBlock}${styleBlock}${fieldsBlock}
@@ -1519,7 +1794,7 @@ Schema:
 {
   "assignment_title": "<inferred>",
   "deliverables": [
-    { "label": "<exact step label>", "answer": "<60–120 words>" }
+    { "label": "<exact step label>", "answer": "<per length rule>" }
   ]
 }
 JSON only. No backticks. No commentary.`;
@@ -1545,6 +1820,7 @@ Rules:
 - Delete any closing that describes the passage's effect ("By doing this, I...", "This shows readers...", "This balance helps...").
 - Keep every concrete fact, task, weakness, mitigation, and example.
 - Keep first-person voice, plain language, contractions.
+- Preserve the word count as closely as possible. Do not shorten below the original length.
 - Do not add anything new. Do not summarize. Just remove the meta.
 - If a passage is already clean, return it unchanged.
 
@@ -1554,7 +1830,7 @@ Schema — return STRICT JSON only:
 Passages:
 ${list}`;
     try {
-      const raw = await C.groqJson(prompt, 4000);
+      const raw = await C.groqJson(prompt, 5000);
       let s = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
       const m = s.match(/\{[\s\S]*\}/);
       if (!m) return deliverables;
@@ -1585,7 +1861,7 @@ ${list}`;
       log('assignment type:', detectedType);
       const prompt = buildPrompt(steps, Ctx.project, Ctx.style, fields, detectedType);
       log('prompt', prompt.length, 'chars →', C.CFG.ai.model);
-      const raw = await C.groqJson(prompt, 4000);
+      const raw = await C.groqJson(prompt, 5000);
       if (isDead()) return;
       const parsed = parse(raw);
       F.title = parsed.assignment_title || document.title || 'Assignment';
