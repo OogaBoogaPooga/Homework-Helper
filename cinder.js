@@ -822,6 +822,7 @@ Rules:
 - Keep first-person voice, plain language, contractions.
 - Do not add anything new. Do not summarize. Just remove the meta.
 - If a passage is already clean, return it unchanged.
+Also check the final sentence of each passage. If it describes what the passage does or what the reader will understand from it ("By doing X, this shows...", "This helps readers see...", "Readers will understand..."), delete it and end on the last substantive claim.
 
 Schema — return STRICT JSON only:
 { "items": ["<rewritten passage 0>", "<rewritten passage 1>", ...] }
