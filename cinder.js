@@ -768,6 +768,7 @@ If the step says "include X, Y, Z," just WRITE X, Y, Z as real sentences.
 Every deliverable references the student's project by actual name or clear descriptor.
 If a step has sub-questions, answer each inside that deliverable, in order.
 100–250 words per deliverable. Don't pad, don't repeat.
+If the assignment step itself says "in this section include X, Y, Z" or "your introduction should explain X," that is NOT permission to describe the section. Write X, Y, Z and the explanation of X directly.
 
 === VOICE ===
 10th grade reading level. Plain words. Short sentences.
