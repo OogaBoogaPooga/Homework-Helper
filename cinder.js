@@ -1,6 +1,6 @@
 // language: JavaScript, file: homework-helper.js, runtime: browser console on Buzz Angular
-// Homework Helper — Auto (quiz) + Ask (chat) + Forge (classwork) + History + Settings.
-// Simple UI: orange header, no logos, no emojis. × fully tears down.
+// Homework Helper — Auto (quiz/flashcards/reading) + Ask (chat) + Forge (classwork) + History + Settings.
+// Groq backend. Simple UI. × fully tears down.
 
 // ============================================================
 // CORE
@@ -196,7 +196,7 @@
     }
   }
 
-  // ---- auto ----
+  // ---- auto MCQ ----
   function buildAutoPrompt(question, choices, multi) {
     const list = choices.map((c, i) => `${i + 1}. ${getChoiceText(c)}`).join('\n');
     const inst = multi
@@ -316,11 +316,236 @@ Reply with JSON only.`;
   }
   const stop = () => { S.running = false; render(); };
 
-  function startSmart() {
+  // ---- flashcard driver ----
+  function detectFlashcards() {
+    return document.querySelector('lib-flash-cards-player');
+  }
+  function getActiveFlashcard() {
+    return document.querySelector('lib-flash-cards-player .card-ct.active .flashcard');
+  }
+  function getFlashcardNext() {
+    return document.querySelector('lib-flash-cards-player .stack-actions button[aria-label="Next"]');
+  }
+  function getStackIndex() {
+    const el = document.querySelector('lib-flash-cards-player .stack-index');
+    if (!el) return null;
+    const m = (el.textContent || '').match(/(\d+)\s*of\s*(\d+)/i);
+    return m ? { current: parseInt(m[1], 10), total: parseInt(m[2], 10) } : null;
+  }
+
+  async function runCards() {
+    if (!detectFlashcards()) { log('no cards detected'); return; }
+    S.running = true; S.busy = true; render();
+    log('card driver started');
+
+    const total = getStackIndex()?.total || 0;
+    let lastIdx = getStackIndex()?.current || 0;
+    let stuck = 0, clicks = 0;
+    const MAX = 500;
+
+    while (S.running && !KILLED && clicks < MAX) {
+      if (isAssignmentComplete() || findCompletionIndicator()) { log('checkmark — stopping cards'); break; }
+      const card = getActiveFlashcard();
+      if (!card) { log('no active card — done'); break; }
+
+      await sleep(randInt(600, 1000));
+      if (KILLED || !S.running) break;
+      humanClick(card);
+      await sleep(randInt(700, 1100));
+
+      const next = getFlashcardNext();
+      if (!next) { log('no Next button — done'); break; }
+      humanClick(next);
+      await sleep(randInt(600, 1000));
+
+      const nowIdx = getStackIndex()?.current || 0;
+      if (nowIdx === lastIdx) {
+        stuck++;
+        if (stuck > 3) { log('index stalled — reached last card'); break; }
+      } else { stuck = 0; }
+      lastIdx = nowIdx;
+
+      clicks++;
+      S.lastAnswer = `card ${nowIdx} of ${total || '?'}`;
+      render();
+      if (clicks % 5 === 0) log(`card ${nowIdx} of ${total}`);
+    }
+
+    S.running = false; S.busy = false;
+    render();
+    log(`card driver stopped after ${clicks} cards`);
+
+    if (isAssignmentComplete() || findCompletionIndicator()) {
+      await sleep(2000);
+      const nav = findNextAssignmentNav();
+      if (nav) { log('→ next assignment'); humanClick(nav); }
+      else { log('no next-assignment nav — advance manually'); }
+    }
+  }
+
+  // ---- reading AFK ----
+  function detectReading() {
+    if (getQuestionBlocks().length) return false;
+    if (detectFlashcards()) return false;
+    const text = (document.body.innerText || '').toLowerCase();
+    const hasTimer = /\b\d{1,2}:\d{2}\b/.test(text) && /(remaining|timer|time left|minutes)/i.test(text);
+    const hasReadingWord = /\b(reading|article|chapter|passage|read the)\b/i.test(text);
+    const longEnough = text.length > 800;
+    return longEnough && (hasTimer || hasReadingWord);
+  }
+
+  function inTopLeft(el) {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.top < 180 && r.left < 400;
+  }
+
+  function findCompletionIndicator() {
+    const btns = [...document.querySelectorAll('button, [role="button"], mat-icon')]
+      .filter(el => el.offsetParent !== null && inTopLeft(el));
+
+    for (const b of btns) {
+      const blob = (
+        (b.className || '').toString() + ' ' +
+        (b.getAttribute('aria-label') || '') + ' ' +
+        (b.getAttribute('title') || '') + ' ' +
+        (b.textContent || '')
+      ).toLowerCase();
+      if (/complete|done|check_circle|check\b/.test(blob) && !/close|cancel|error/.test(blob)) return b;
+
+      const kids = b.querySelectorAll('*');
+      for (const k of kids) {
+        const r = k.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;
+        if (r.width > 22 || r.height > 22) continue;
+        if (r.left > 120 || r.top > 120) continue;
+        const bg = getComputedStyle(k).backgroundColor || '';
+        const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+        if (!m) continue;
+        const [_, r_, g_, b_] = m.map(Number);
+        if (g_ > 120 && g_ > r_ + 30 && g_ > b_ + 30) return k;
+      }
+
+      const bg = getComputedStyle(b).backgroundColor || '';
+      const m = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+      if (m) {
+        const [_, r_, g_, b_] = m.map(Number);
+        if (g_ > 120 && g_ > r_ + 30 && g_ > b_ + 30) return b;
+      }
+    }
+
+    for (const sel of ['[aria-label*="complete" i]', '[title*="complete" i]', '[class*="complete" i]']) {
+      const el = [...document.querySelectorAll(sel)].find(e => e.offsetParent !== null && !/close|cancel/i.test(e.getAttribute('aria-label') || ''));
+      if (el) return el;
+    }
+
+    const submit = [...document.querySelectorAll('button, a')].find(b =>
+      b.offsetParent !== null && /^(submit|finish|turn in|mark complete|continue|next)$/i.test((b.textContent || '').trim())
+    );
+    return submit || null;
+  }
+
+  function isAssignmentComplete() {
+    const sels = ['.assignment-complete', '.completed-badge', '[aria-label*="complete" i]', '[title*="complete" i]'];
+    for (const sel of sels) {
+      const el = [...document.querySelectorAll(sel)].find(e => e.offsetParent !== null);
+      if (el) return true;
+    }
+    return false;
+  }
+
+  function findNextAssignmentNav() {
+    const sels = [
+      'button[aria-label*="next" i]',
+      'a[aria-label*="next" i]',
+      '[title*="next" i]',
+      '[aria-label*="forward" i]'
+    ];
+    for (const sel of sels) {
+      const el = [...document.querySelectorAll(sel)].find(e => e.offsetParent !== null);
+      if (el && !/previous|back|left/i.test((el.getAttribute('aria-label') || el.getAttribute('title') || ''))) return el;
+    }
+    const icons = [...document.querySelectorAll('mat-icon, i, span')].filter(e =>
+      e.children.length === 0 &&
+      e.offsetParent !== null &&
+      /^chevron_right$/.test((e.textContent || '').trim())
+    );
+    if (icons.length) return icons[0].closest('button, a') || icons[0];
+    return null;
+  }
+
+  function setupCompletionWatcher() {
+    return new Promise(resolve => {
+      let resolved = false;
+      const done = el => { if (!resolved) { resolved = true; resolve(el); } };
+      const probe = () => { const el = findCompletionIndicator(); if (el) done(el); };
+      probe();
+
+      const mo = new MutationObserver(probe);
+      mo.observe(document.body, {
+        childList: true, subtree: true,
+        attributes: true,
+        attributeFilter: ['class', 'aria-label', 'title', 'style']
+      });
+
+      const iv = setInterval(probe, 2000);
+
+      killHooks.push(() => { mo.disconnect(); clearInterval(iv); });
+    });
+  }
+
+  async function runReadingAFK() {
+    S.running = true; S.busy = true; render();
+    log('reading AFK started — auto-scrolling until checkmark');
+
+    const completionPromise = setupCompletionWatcher();
+    const startedAt = Date.now();
+
+    const scrollLoop = (async () => {
+      while (S.running && !KILLED) {
+        if (Date.now() - startedAt > 60 * 60 * 1000) { log('AFK 1h timeout'); S.running = false; break; }
+        window.scrollBy({ top: randInt(80, 200), behavior: 'smooth' });
+        S.lastAnswer = `scrolling · ${Math.round(window.scrollY)}px`;
+        render();
+        await sleep(randInt(2800, 7000));
+        if (!S.running || KILLED) break;
+        if (Math.random() < 0.18) {
+          window.scrollBy({ top: -randInt(60, 180), behavior: 'smooth' });
+          await sleep(randInt(1200, 2600));
+        }
+      }
+    })();
+
+    const stopWatcher = new Promise(res => {
+      const iv = setInterval(() => { if (!S.running || KILLED) { clearInterval(iv); res(null); } }, 500);
+      killHooks.push(() => clearInterval(iv));
+    });
+
+    const completion = await Promise.race([completionPromise, stopWatcher]);
+
+    S.running = false;
+    await scrollLoop;
+    S.busy = false;
+    render();
+
+    if (completion) {
+      log('checkmark detected — advancing');
+      await sleep(2500);
+      const nav = findNextAssignmentNav();
+      if (nav) { log('→ next assignment'); humanClick(nav); }
+      else { log('no next-assignment nav found — click manually'); }
+    }
+  }
+
+  // ---- smart start ----
+  async function startSmart() {
     if (KILLED) return;
     if (S.running) { stop(); return; }
+
     if (getQuestionBlocks().length) { log('quiz — auto'); loop(); return; }
-    log('no quiz — forge');
+    if (detectFlashcards()) { log('flashcards detected — card driver'); await runCards(); return; }
+    if (detectReading()) { log('reading page detected — AFK mode'); await runReadingAFK(); return; }
+
+    log('no quiz, cards, or reading — forge');
     if (window.__forge?.run) {
       const t = document.querySelector('#__hh_panel .hh-tab[data-tab="forge"]');
       if (t) t.click();
@@ -421,6 +646,16 @@ Reply with JSON only.`;
           </div>
 
           <div class="hh-view" data-view="forge" style="display:none">
+            <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Assignment type (blank = auto)</div>
+            <select id="${PID}_fType" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
+              <option value="">Auto-detect</option>
+              <option value="written">Written (prose)</option>
+              <option value="presentation">Presentation / slides</option>
+              <option value="canva">Canva / visual design</option>
+              <option value="flashcards">Flashcards</option>
+              <option value="video">Video script</option>
+              <option value="walkthrough">Website walkthrough</option>
+            </select>
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Project context (saved)</div>
             <textarea id="${PID}_fCtx" placeholder="One line about your project." style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px;resize:vertical;height:50px"></textarea>
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Voice sample (saved)</div>
@@ -660,12 +895,15 @@ Reply with JSON only.`;
   const LS_CTX = '__hh_forge_ctx';
   const LS_STY = '__hh_forge_style';
   const LS_HIS = '__hh_forge_hist';
+  const LS_TYP = '__hh_forge_type';
 
   const Ctx = {
     project: localStorage.getItem(LS_CTX) || '',
     style: localStorage.getItem(LS_STY) || '',
+    typeOverride: localStorage.getItem(LS_TYP) || '',
     saveProject(v) { this.project = v; localStorage.setItem(LS_CTX, v); },
-    saveStyle(v) { this.style = v; localStorage.setItem(LS_STY, v); }
+    saveStyle(v) { this.style = v; localStorage.setItem(LS_STY, v); },
+    saveType(v) { this.typeOverride = v; localStorage.setItem(LS_TYP, v); }
   };
 
   const F = {
@@ -674,6 +912,52 @@ Reply with JSON only.`;
   };
 
   const cleanText = t => String(t).replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
+
+  function detectType(text) {
+    const t = (text || '').toLowerCase();
+    if (/\b(canva|canva\.com)\b/.test(t)) return 'canva';
+    if (/\b(slide|slides|presentation|powerpoint|google slides|deck)\b/.test(t)) return 'presentation';
+    if (/\b(flashcard|flash card|quizlet|anki|term and definition|vocab card)\b/.test(t)) return 'flashcards';
+    if (/\b(record a video|loom|screencastify|voiceover|voice over|narrate)\b/.test(t)) return 'video';
+    if (/\b(go to|visit|navigate to|sign up at|log in to|create an account on)\b/.test(t) && /https?:\/\/|\.com|\.org|\.net/.test(t)) return 'walkthrough';
+    return 'written';
+  }
+
+  const TYPE_INSTRUCTIONS = {
+    written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable. No bullets unless the step itself is a list prompt.`,
+    presentation: `OUTPUT SHAPE: Slide-by-slide. For each deliverable:
+Slide 1: <title>
+- bullet
+- bullet
+Speaker notes: one sentence of what to say
+
+Slide 2: <title>
+...
+Aim for 5–8 slides per deliverable unless the step specifies a count. Keep bullets under 12 words each.`,
+    canva: `OUTPUT SHAPE: Numbered build steps for Canva. For each deliverable:
+1. Open Canva → search "<template type>" → pick a clean template.
+2. Title slide text: "<exact text>"
+3. Slide 2: <what goes on it, exact text to type>
+4. Element to add: <icon/photo/graphic idea>
+5. Color scheme: <suggest 2–3 colors>
+Give exact text the student types into each element.`,
+    flashcards: `OUTPUT SHAPE: Numbered term/definition pairs. For each deliverable:
+1. Term: "<term>"
+   Definition: "<one-sentence plain-language definition>"
+2. Term: "<term>"
+   Definition: "<one-sentence plain-language definition>"
+Give 8–15 cards per deliverable unless the step specifies a count. Definitions must be one sentence, no jargon.`,
+    video: `OUTPUT SHAPE: Script. For each deliverable:
+[0:00] <what to say, word for word>
+[0:15] <next beat>
+Include what to show on screen next to each beat. Aim for 1–2 minutes of script per deliverable.`,
+    walkthrough: `OUTPUT SHAPE: Numbered navigation steps. For each deliverable:
+1. Go to <url or site name>.
+2. Click "<exact button label>".
+3. Enter <what to type>.
+4. On the next page, click "<exact label>".
+Include exact button names and URLs. If an account is required, note it. Keep each step one action.`
+  };
 
   function findStepTabs() {
     return [...document.querySelectorAll('button, a, li, [role="tab"], .nav-item, .nav-link, .mdc-tab')]
@@ -737,7 +1021,7 @@ Reply with JSON only.`;
     }));
   }
 
-  function buildPrompt(steps, ctx, style, fields) {
+  function buildPrompt(steps, ctx, style, fields, type) {
     const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 1800)}`).join('\n\n');
     const ctxBlock = ctx && ctx.trim()
       ? `\n\nSTUDENT'S PROJECT — every deliverable is about THIS:\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
@@ -761,6 +1045,10 @@ If a step's content is under 80 chars, write "[no content scraped]" — do NOT i
 Label each deliverable EXACTLY as the step label.
 Only merge steps whose labels are literally identical.
 
+=== OUTPUT SHAPE ===
+Assignment type: ${type}
+${TYPE_INSTRUCTIONS[type] || TYPE_INSTRUCTIONS.written}
+
 === CONTENT ===
 CRITICAL — READ CAREFULLY:
 Imagine the reader is holding the finished document. They see the section heading. They want to read what's UNDER that heading.
@@ -775,19 +1063,19 @@ Start with the actual first sentence of content. End on the actual point.
 The label tells you where it goes. Do not write the label into the answer.
 Every deliverable references the student's project by actual name or clear descriptor.
 If a step has sub-questions, answer each inside that deliverable, in order.
-60–120 words per deliverable. Shorter is better. Cut every sentence that doesn't add a fact, a reason, or an example. No padding, no restating, no transitions like "another key point" or "it's also worth noting". If a step can be answered in three tight sentences, do that.
 If the assignment step itself says "in this section include X, Y, Z" or "your introduction should explain X," that is NOT permission to describe the section. Write X, Y, Z and the explanation of X directly.
-Also ban reflective meta-tails at the end of a deliverable: "By stating these limits...", "Readers will see...", "This helps the project...", "This balance shows...". End on the actual point, not on a sentence describing the effect of the writing.
+Also ban reflective meta-tails at the end of a deliverable: "By stating these limits...", "Readers will see...", "This helps the project...". End on the actual point, not on a sentence describing the effect of the writing.
 
 === VOICE ===
 10th grade reading level. Plain words. Short sentences.
-Contractions: I'm, it's, doesn't, can't, won't. 
+Contractions: I'm, it's, doesn't, can't, won't.
 Short sentences. One idea per sentence. No sentence over 20 words unless it needs to be.
 Say "it", "my project", "my AI" — NEVER "the system", "the platform", "the AI application".
 No semicolons. No markdown headers. No **bold**. Plain prose.
 Bullets only if the step itself is a list prompt.
 Ban: furthermore, moreover, additionally, in conclusion, plays a crucial role, leverages, facilitates, underscores, optimal, robust.
 Don't start two sentences the same way.
+60–120 words per deliverable. Shorter is better. Cut every sentence that doesn't add a fact, a reason, or an example. No padding, no restating, no transitions like "another key point" or "it's also worth noting". If a step can be answered in three tight sentences, do that.
 
 === ASSIGNMENT CONTENT ===
 ${stepBlob}${ctxBlock}${styleBlock}${fieldsBlock}
@@ -796,7 +1084,7 @@ Schema:
 {
   "assignment_title": "<inferred>",
   "deliverables": [
-    { "label": "<exact step label>", "answer": "<100–250 words>" }
+    { "label": "<exact step label>", "answer": "<60–120 words>" }
   ]
 }
 JSON only. No backticks. No commentary.`;
@@ -810,7 +1098,8 @@ JSON only. No backticks. No commentary.`;
     if (!Array.isArray(o.deliverables)) throw new Error('no deliverables');
     return o;
   }
-  async function cleanDeliverables(deliverables, steps) {
+
+  async function cleanDeliverables(deliverables) {
     if (!deliverables.length) return deliverables;
     const list = deliverables.map((d, i) => `[${i}]\n${d.answer}`).join('\n\n---\n\n');
     const prompt = `Rewrite each numbered passage below so it contains ONLY the actual content — no references to any document, section, template, or introduction.
@@ -823,7 +1112,6 @@ Rules:
 - Keep first-person voice, plain language, contractions.
 - Do not add anything new. Do not summarize. Just remove the meta.
 - If a passage is already clean, return it unchanged.
-Also check the final sentence of each passage. If it describes what the passage does or what the reader will understand from it ("By doing X, this shows...", "This helps readers see...", "Readers will understand..."), delete it and end on the last substantive claim.
 
 Schema — return STRICT JSON only:
 { "items": ["<rewritten passage 0>", "<rewritten passage 1>", ...] }
@@ -843,7 +1131,7 @@ ${list}`;
       return deliverables;
     }
   }
-  
+
   async function forge() {
     if (F.running || isDead()) return;
     F.running = true; renderForge();
@@ -857,13 +1145,21 @@ ${list}`;
         renderForge(); return;
       }
       const fields = findEditableFields();
-      const prompt = buildPrompt(steps, Ctx.project, Ctx.style, fields);
+      const allText = steps.map(s => s.content).join('\n');
+      const detectedType = Ctx.typeOverride || detectType(allText);
+      log('assignment type:', detectedType);
+      const prompt = buildPrompt(steps, Ctx.project, Ctx.style, fields, detectedType);
       log('prompt', prompt.length, 'chars →', C.CFG.ai.model);
       const raw = await C.groqJson(prompt, 4000);
       if (isDead()) return;
       const parsed = parse(raw);
       F.title = parsed.assignment_title || document.title || 'Assignment';
       F.deliverables = parsed.deliverables;
+      if (detectedType === 'written') {
+        log('cleanup pass — stripping meta-narration');
+        F.deliverables = await cleanDeliverables(F.deliverables);
+        if (isDead()) return;
+      }
       F.history.unshift({ ts: Date.now(), title: F.title, steps: steps.length, deliverables: F.deliverables });
       F.history = F.history.slice(0, 30);
       try { localStorage.setItem(LS_HIS, JSON.stringify(F.history)); } catch {}
@@ -886,6 +1182,8 @@ ${list}`;
     const btn = tabsBar.querySelector('[data-tab="forge"]');
     if (btn) btn.addEventListener('click', () => { if (!isDead()) renderForge(); });
 
+    const ty = $('_fType');
+    if (ty) { ty.value = Ctx.typeOverride || ''; ty.onchange = () => { Ctx.saveType(ty.value); }; }
     const ctx = $('_fCtx'); if (ctx) { ctx.value = Ctx.project; ctx.oninput = () => Ctx.saveProject(ctx.value); }
     const sty = $('_fStyle'); if (sty) { sty.value = Ctx.style; sty.oninput = () => Ctx.saveStyle(sty.value); }
     const go = $('_fGo'); if (go) go.onclick = forge;
