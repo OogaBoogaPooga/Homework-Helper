@@ -1,9 +1,10 @@
 // language: JavaScript, file: homework-helper.js, runtime: browser console on Buzz Angular
-// Homework Helper — Auto (quiz/flashcards/lessons) + Ask + Forge + History + Settings.
+// Homework Helper — Auto (quiz/flashcards/lessons/fill) + Ask + Forge + History + Settings.
+// Groq backend. Simple UI. × fully tears down.
 
-
+// ============================================================
 // CORE
-
+// ============================================================
 (() => {
   'use strict';
 
@@ -398,7 +399,7 @@ Reply with JSON only.`;
     if (/\b(submit (your|this|the) assignment|dropbox|rubric|grading criteria)\b/i.test(bodyHead)) return 'assignment';
 
     const inputs = [...document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"]')]
-      .filter(t => t.offsetParent !== null);
+      .filter(t => t.offsetParent !== null && !t.closest('#__hh_ui'));
     if (inputs.length) return 'assignment';
 
     if (document.querySelector('video')) return 'lesson';
@@ -533,7 +534,6 @@ Reply with JSON only.`;
   }
 
   async function handlePassiveLesson() {
-    // 1. Mark-complete button → click it.
     const markBtn = findMarkCompleteButton();
     if (markBtn) {
       log('found Mark Complete button — clicking');
@@ -541,21 +541,13 @@ Reply with JSON only.`;
       if (!S.running || KILLED) return false;
       humanClick(markBtn);
       await sleep(2200);
-      if (findCompletionIndicator() || isAssignmentComplete()) {
-        log('marked complete');
-        return true;
-      }
+      if (findCompletionIndicator() || isAssignmentComplete()) { log('marked complete'); return true; }
       log('no badge after mark — assuming done');
       return true;
     }
 
-    // 2. Already complete?
-    if (findCompletionIndicator() || isAssignmentComplete()) {
-      log('already complete');
-      return true;
-    }
+    if (findCompletionIndicator() || isAssignmentComplete()) { log('already complete'); return true; }
 
-    // 3. Instructions/reflection page → stash text, wait, advance.
     const bodyText = document.body.innerText || '';
     if (looksLikeQuestions(bodyText) && !document.querySelector('video')) {
       stashLessonContext();
@@ -564,7 +556,6 @@ Reply with JSON only.`;
       return true;
     }
 
-    // 4. Video present → mute, 2x, wait for checkmark.
     const vid = document.querySelector('video');
     if (vid) {
       try {
@@ -575,7 +566,6 @@ Reply with JSON only.`;
       } catch (e) { log('video play failed:', e.message); }
     }
 
-    // 5. Wait for badge.
     log('waiting for checkmark…');
     const completion = await Promise.race([
       setupCompletionWatcher(),
@@ -586,11 +576,7 @@ Reply with JSON only.`;
       (async () => { await sleep(10 * 60 * 1000); return null; })()
     ]);
 
-    if (completion) {
-      log('checkmark arrived');
-      await sleep(1500);
-      return true;
-    }
+    if (completion) { log('checkmark arrived'); await sleep(1500); return true; }
     log('no checkmark after 10 min — moving on anyway');
     return false;
   }
@@ -612,7 +598,15 @@ Reply with JSON only.`;
 
       if (kind === 'quiz') { log('hit quiz — stopping chain. Click Start.'); break; }
       if (kind === 'cards') { log('hit flashcards — stopping chain. Click Start.'); break; }
-      if (kind === 'assignment') { log('hit assignment — stopping chain. Run Forge.'); break; }
+      if (kind === 'assignment') {
+        if (hasPendingLesson() && !needsFileUpload()) {
+          log('hit fillable assignment — running Fill mode');
+          await runFillAssignment();
+          return;
+        }
+        log('hit assignment — stopping chain. Run Forge.');
+        break;
+      }
       if (kind === 'unknown') { log('unknown page — stopping chain'); break; }
 
       await handlePassiveLesson();
@@ -629,6 +623,281 @@ Reply with JSON only.`;
     S.running = false; S.busy = false;
     render();
     log(`chain stopped after ${advanced} advances`);
+  }
+
+  // ============================================================
+  // FILL MODE — answer text boxes, confirm, submit
+  // ============================================================
+  function hasPendingLesson() {
+    try {
+      const raw = localStorage.getItem('__hh_pending_lesson');
+      if (!raw) return false;
+      const p = JSON.parse(raw);
+      return p && p.ts && (Date.now() - p.ts) < 60 * 60 * 1000;
+    } catch { return false; }
+  }
+
+  function getPendingLesson() {
+    try {
+      const raw = localStorage.getItem('__hh_pending_lesson');
+      if (!raw) return null;
+      const p = JSON.parse(raw);
+      if (!p || !p.ts || (Date.now() - p.ts) > 60 * 60 * 1000) return null;
+      return p;
+    } catch { return null; }
+  }
+
+  function needsFileUpload() {
+    const text = (document.body.innerText || '').toLowerCase();
+    if (/\b(upload (a )?file|attach (a )?file|turn in as (a )?file|submit as (a )?file|file upload)\b/.test(text)) return true;
+    const fi = [...document.querySelectorAll('input[type="file"]')].find(el => el.offsetParent !== null);
+    return !!fi;
+  }
+
+  function findSubmissionBox() {
+    const isOurs = el => !!el.closest('#__hh_ui');
+    const cands = [...document.querySelectorAll('textarea, [contenteditable="true"]')]
+      .filter(el => el.offsetParent !== null && !isOurs(el));
+    return cands[0] || null;
+  }
+
+  function findSubmitButton() {
+    const rx = /^(submit|turn in|turn this in|finish|complete|mark complete|save and submit)$/i;
+    return [...document.querySelectorAll('button, a, [role="button"]')]
+      .find(el =>
+        el.offsetParent !== null &&
+        !el.disabled &&
+        !el.closest('#__hh_ui') &&
+        rx.test((el.textContent || '').trim())
+      ) || null;
+  }
+
+  async function openSubmissionBox() {
+    let box = findSubmissionBox();
+    if (box) return box;
+
+    // Buzz sometimes hides the editor behind a "+" or a "Comments" area. Try clicking.
+    const plusEls = [...document.querySelectorAll('button, [role="button"], mat-icon, span')]
+      .filter(el => {
+        if (el.offsetParent === null) return false;
+        if (el.closest('#__hh_ui')) return false;
+        const t = (el.textContent || '').trim();
+        const lbl = (el.getAttribute('aria-label') || '').trim();
+        return /^\+$/.test(t) || /add comment|add reply|add note|start writing|write a comment/i.test(lbl + ' ' + t);
+      });
+
+    for (const el of plusEls) {
+      log('opening comment editor');
+      humanClick(el);
+      await sleep(900);
+      box = findSubmissionBox();
+      if (box) return box;
+    }
+
+    // Fallback: click the "Comments" label
+    const commentLabel = [...document.querySelectorAll('*')]
+      .find(el => el.children.length === 0 && el.offsetParent !== null && /^comments?$/i.test((el.textContent || '').trim()));
+    if (commentLabel) {
+      const container = commentLabel.closest('section, div');
+      if (container) {
+        const target = container.querySelector('[role="button"], button, mat-icon, [class*="add"]');
+        if (target) {
+          log('clicking comment area');
+          humanClick(target);
+          await sleep(900);
+          box = findSubmissionBox();
+          if (box) return box;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  function fillSubmissionBox(box, text) {
+    if (!box) return false;
+    try {
+      if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
+        const proto = box.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(box, text);
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      // contenteditable
+      box.focus();
+      box.innerText = text;
+      box.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true }));
+      box.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    } catch (e) {
+      log('fill failed:', e.message);
+      return false;
+    }
+  }
+
+  async function generateAnswersForLesson(lesson) {
+    const prompt = `You are a real student answering reflection questions. Below is the source material (a lesson page with questions), followed by the assignment page.
+
+Write ONE answer per question, in order. Plain prose, first person, 60-120 words each. No headers. No bullet lists. No meta-commentary ("In this response I..." etc). Just the answer text.
+
+If there are 3 questions, write 3 paragraphs separated by blank lines. Do NOT include the question text — just the answers.
+
+LESSON SOURCE:
+"""
+${lesson.title}
+${lesson.text.slice(0, 2800)}
+"""
+
+Return plain text only — no JSON, no markdown, no intro line.`;
+    const raw = await groqCall([{ role: 'user', content: prompt }], { maxTokens: 1500, temperature: 0.4 });
+    return (raw || '').trim();
+  }
+
+  function showFillPopup(lesson, answers, boxFound) {
+    return new Promise(resolve => {
+      const el = document.createElement('div');
+      el.id = '__hh_fill_popup';
+      el.style.cssText = `
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        z-index: 2147483647; width: min(720px, 92vw);
+        background: #1a1a1a; color: #f0f0f0;
+        border: 2px solid #e07b39; border-radius: 12px;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        box-shadow: 0 12px 60px rgba(0,0,0,.8);
+        overflow: hidden;
+      `;
+      el.innerHTML = `
+        <div style="background:#e07b39;color:#1a1a1a;padding:10px 16px;font-weight:700;display:flex;justify-content:space-between;align-items:center;">
+          <span>Review before submit</span>
+          <span id="__hh_fill_x" style="cursor:pointer;font-size:20px;line-height:1;">×</span>
+        </div>
+        <div style="padding:14px 16px;max-height:60vh;overflow-y:auto;">
+          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:700;">Source questions</div>
+          <div style="background:#0e0e0e;border-radius:6px;padding:10px;font-size:12px;color:#bbb;white-space:pre-wrap;max-height:160px;overflow-y:auto;margin-bottom:14px;">${(lesson.title + '\n\n' + lesson.text.slice(0, 1200)).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>
+          <div style="font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;font-weight:700;">Generated answers ${boxFound ? '(will be pasted into the comment box)' : '(box not found — you will need to paste manually)'}</div>
+          <div style="background:#0e0e0e;border-left:3px solid #e07b39;border-radius:6px;padding:10px;font-size:13px;color:#eee;white-space:pre-wrap;max-height:260px;overflow-y:auto;">${answers.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]))}</div>
+          <div style="margin-top:12px;font-size:11px;color:#888;">
+            Confirm to paste (if needed) and click Submit / Turn in. Cancel to stop and paste manually.
+          </div>
+        </div>
+        <div style="padding:12px 16px;background:#141414;border-top:1px solid #262626;display:flex;gap:8px;">
+          <button id="__hh_fill_confirm" style="flex:1;padding:10px;border:0;border-radius:8px;background:#2e7d32;color:#fff;font-weight:700;font-size:13px;cursor:pointer;">Confirm & Submit</button>
+          <button id="__hh_fill_manual" style="flex:0 0 auto;padding:10px 16px;border:0;border-radius:8px;background:#333;color:#ddd;font-weight:600;font-size:13px;cursor:pointer;">Copy Only</button>
+          <button id="__hh_fill_cancel" style="flex:0 0 auto;padding:10px 16px;border:0;border-radius:8px;background:#5a1e1e;color:#ffd6d6;font-weight:600;font-size:13px;cursor:pointer;">Cancel</button>
+        </div>
+      `;
+      document.body.appendChild(el);
+
+      const cleanup = (result) => {
+        el.remove();
+        resolve(result);
+      };
+
+      document.getElementById('__hh_fill_x').onclick = () => cleanup('cancel');
+      document.getElementById('__hh_fill_cancel').onclick = () => cleanup('cancel');
+      document.getElementById('__hh_fill_manual').onclick = () => {
+        try { navigator.clipboard.writeText(answers); } catch {}
+        cleanup('manual');
+      };
+      document.getElementById('__hh_fill_confirm').onclick = () => cleanup('confirm');
+    });
+  }
+
+  async function runFillAssignment() {
+    if (KILLED) return;
+    if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') {
+      const k = prompt('Paste your Groq API key (starts with gsk_).');
+      if (k && k.trim()) { CFG.ai.key = k.trim(); saveCfg(); }
+      else return;
+    }
+
+    const lesson = getPendingLesson();
+    if (!lesson) { log('no stashed lesson — run Forge instead'); return; }
+
+    S.running = true; S.busy = true; render();
+    log('fill mode — generating answers for', lesson.title);
+
+    let answers = '';
+    try {
+      answers = await generateAnswersForLesson(lesson);
+    } catch (e) {
+      log('answer generation failed:', e.message);
+      S.running = false; S.busy = false; render();
+      return;
+    }
+    if (!answers) { log('empty answer'); S.running = false; S.busy = false; render(); return; }
+    log('answers ready —', answers.length, 'chars');
+
+    // Try to open/find the submission box and fill it BEFORE showing popup
+    let box = await openSubmissionBox();
+    let boxFilled = false;
+    if (box) {
+      boxFilled = fillSubmissionBox(box, answers);
+      log(boxFilled ? 'comment box filled' : 'could not fill comment box');
+    } else {
+      log('no comment box found — you will need to paste manually');
+    }
+
+    // Show confirmation popup
+    const choice = await showFillPopup(lesson, answers, boxFilled);
+
+    // Clear the stash — used
+    try { localStorage.removeItem('__hh_pending_lesson'); } catch {}
+
+    if (choice !== 'confirm') {
+      log('user chose:', choice);
+      S.running = false; S.busy = false; render();
+      return;
+    }
+
+    // If box wasn't found during the first pass, try again
+    if (!boxFilled) {
+      box = await openSubmissionBox();
+      if (box) boxFilled = fillSubmissionBox(box, answers);
+    }
+
+    // Click Submit
+    await sleep(600);
+    const submit = findSubmitButton();
+    if (submit) {
+      log('clicking submit:', (submit.textContent || '').trim());
+      humanClick(submit);
+      await sleep(2200);
+
+      // Buzz sometimes shows a confirmation dialog — click "yes/confirm/ok"
+      const confirm = [...document.querySelectorAll('button, [role="button"]')]
+        .find(b => b.offsetParent !== null && !b.closest('#__hh_ui') && /^(yes|confirm|ok|submit|yes, submit|turn in)$/i.test((b.textContent || '').trim()));
+      if (confirm) {
+        log('confirming dialog');
+        humanClick(confirm);
+        await sleep(1800);
+      }
+    } else {
+      log('no submit button found — paste and submit manually');
+    }
+
+    S.running = false; S.busy = false; render();
+
+    // Advance to next page
+    await sleep(2500);
+    const nav = findNextAssignmentNav();
+    if (nav) {
+      log('→ advancing');
+      humanClick(nav);
+      await sleep(3000);
+
+      // Re-classify the new page and continue if it's a lesson
+      const nextKind = classifyPage();
+      log('next page:', nextKind);
+      if (nextKind === 'lesson') {
+        log('resuming lesson chain');
+        await runLessonChain();
+      }
+    } else {
+      log('no next nav — click manually');
+    }
   }
 
   // ---- smart start ----
@@ -648,6 +917,11 @@ Reply with JSON only.`;
     if (kind === 'cards') { log('flashcards — card driver'); await runCards(); return; }
     if (kind === 'lesson') { log('lesson — AFK chain'); await runLessonChain(); return; }
     if (kind === 'assignment') {
+      if (hasPendingLesson() && !needsFileUpload()) {
+        log('fill mode — answering stashed questions');
+        await runFillAssignment();
+        return;
+      }
       log('assignment — forge');
       if (window.__forge?.run) {
         const t = document.querySelector('#__hh_panel .hh-tab[data-tab="forge"]');
@@ -907,6 +1181,7 @@ Reply with JSON only.`;
     try { window.__helperKillHooks = []; } catch {}
     try { if (window.__helperForgeBoot) { clearInterval(window.__helperForgeBoot); window.__helperForgeBoot = null; } } catch {}
     try { document.getElementById(UI_ID)?.remove(); } catch {}
+    try { document.getElementById('__hh_fill_popup')?.remove(); } catch {}
     try { if (window.__forge) delete window.__forge; } catch {}
     try { delete window.__cinder; } catch {}
     console.log('%c[hw-helper] closed — paste the loader again to reload.', 'color:#e07b39;font-weight:bold');
