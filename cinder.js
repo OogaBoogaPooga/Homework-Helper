@@ -118,11 +118,9 @@
       document.dispatchEvent(new MouseEvent('mousemove', o));
     } catch {}
   }
-
   function driftScroll() {
     try { window.scrollBy({ top: randInt(-40, 60), behavior: 'smooth' }); } catch {}
   }
-
   function tickHumanActivity() {
     if (KILLED) return;
     const r = Math.random();
@@ -130,12 +128,10 @@
     else if (r < 0.75) { driftMouse(); driftScroll(); }
     else if (r < 0.85) driftScroll();
   }
-
   function idlePause() {
     if (Math.random() < 0.20) return sleep(randInt(2500, 7000));
     return Promise.resolve();
   }
-
   function fireKeystrokes(el, text) {
     try {
       el.focus();
@@ -148,7 +144,6 @@
       }
     } catch {}
   }
-
   function spoofFocus() {
     try {
       window.dispatchEvent(new FocusEvent('focus', { bubbles: true }));
@@ -370,15 +365,9 @@ Reply with JSON only.`;
   const stop = () => { S.running = false; render(); };
 
   // ---- flashcard driver ----
-  function detectFlashcards() {
-    return document.querySelector('lib-flash-cards-player');
-  }
-  function getActiveFlashcard() {
-    return document.querySelector('lib-flash-cards-player .card-ct.active .flashcard');
-  }
-  function getFlashcardNext() {
-    return document.querySelector('lib-flash-cards-player .stack-actions button[aria-label="Next"]');
-  }
+  function detectFlashcards() { return document.querySelector('lib-flash-cards-player'); }
+  function getActiveFlashcard() { return document.querySelector('lib-flash-cards-player .card-ct.active .flashcard'); }
+  function getFlashcardNext() { return document.querySelector('lib-flash-cards-player .stack-actions button[aria-label="Next"]'); }
   function getStackIndex() {
     const el = document.querySelector('lib-flash-cards-player .stack-index');
     if (!el) return null;
@@ -400,24 +389,18 @@ Reply with JSON only.`;
       if (isAssignmentComplete() || findCompletionIndicator()) { log('checkmark — stopping cards'); break; }
       const card = getActiveFlashcard();
       if (!card) { log('no active card — done'); break; }
-
       await sleep(randInt(600, 1000));
       if (KILLED || !S.running) break;
       humanClick(card);
       await sleep(randInt(700, 1100));
-
       const next = getFlashcardNext();
       if (!next) { log('no Next button — done'); break; }
       humanClick(next);
       await sleep(randInt(600, 1000));
-
       const nowIdx = getStackIndex()?.current || 0;
-      if (nowIdx === lastIdx) {
-        stuck++;
-        if (stuck > 3) { log('index stalled — reached last card'); break; }
-      } else { stuck = 0; }
+      if (nowIdx === lastIdx) { stuck++; if (stuck > 3) { log('index stalled — reached last card'); break; } }
+      else { stuck = 0; }
       lastIdx = nowIdx;
-
       clicks++;
       S.lastAnswer = `card ${nowIdx} of ${total || '?'}`;
       render();
@@ -505,7 +488,6 @@ Reply with JSON only.`;
       const el = [...document.querySelectorAll(sel)].find(e => e.offsetParent !== null && !/close|cancel/i.test(e.getAttribute('aria-label') || ''));
       if (el) return el;
     }
-
     return null;
   }
 
@@ -562,7 +544,6 @@ Reply with JSON only.`;
       });
 
       const iv = setInterval(probe, 2000);
-
       killHooks.push(() => { mo.disconnect(); clearInterval(iv); });
     });
   }
@@ -605,11 +586,7 @@ Reply with JSON only.`;
 
     if (findCompletionIndicator() || isAssignmentComplete()) { log('already complete'); return true; }
 
-    if (hasQuestions) {
-      log('instructions page — advancing in 6s');
-      await sleep(6000);
-      return true;
-    }
+    if (hasQuestions) { log('instructions page — advancing in 6s'); await sleep(6000); return true; }
 
     const vid = document.querySelector('video');
     if (vid) {
@@ -723,7 +700,6 @@ Reply with JSON only.`;
       'button, a, [role="button"], .mdc-button, [mat-flat-button], [mat-raised-button], [mat-stroked-button]'
     )];
 
-    // 1. textContent match
     for (const el of els) {
       if (el.offsetParent === null) continue;
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
@@ -732,7 +708,6 @@ Reply with JSON only.`;
       if (rx.test(txt)) return el;
     }
 
-    // 2. aria-label match
     for (const el of els) {
       if (el.offsetParent === null) continue;
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
@@ -741,7 +716,6 @@ Reply with JSON only.`;
       if (rx.test(lbl)) return el;
     }
 
-    // 3. primary-colored button inside a submission-looking section
     const section = [...document.querySelectorAll('section, div, mat-card')]
       .find(el =>
         el.offsetParent !== null &&
@@ -909,30 +883,32 @@ Reply with JSON only.`;
     const lengthLine = describeLength(lengthReq) || 'Each answer should be roughly 60-120 words — short and to the point.';
     if (lengthReq) log('detected length requirement:', lengthReq.raw);
 
-    const makePrompt = (sourceText, short) => `You are a real student answering reflection questions for a class assignment.
+    const makePrompt = (sourceText, short) => `You are a real 11th grade student answering reflection questions for a class assignment. You write like a normal high schooler — not an adult, not a chatbot, not a resume.
 
-You will get the SOURCE material (the questions the assignment wants answered) and optional ASSIGNMENT CONTEXT (the submission page text).
-
-Write ONE answer per distinct question, in order, separated by blank lines. First person, plain prose, no headers, no bullet lists, no meta-commentary ("In this response I will...").
-
-LENGTH RULE (hard requirement):
+LENGTH (hard rule):
 ${lengthLine}
-If no length was specified, keep it SHORT — 2-4 sentences per answer. Do not pad.
 
 VOICE:
-- Plain words. Short sentences. No semicolons. No markdown.
-- Contractions allowed: I'm, it's, doesn't, can't.
-- Say "it", "my project", "I" — never "the system" or "the AI application".
+- Plain words. Short sentences. No semicolons. No markdown. No bullet lists.
+- Contractions: I'm, it's, doesn't, can't, won't.
+- Say "it", "my project", "I". Never "the system" or "the AI application."
 - Answer the actual question. Don't restate it.
 
-EXAMPLES — this is what breaks the output:
-- If a question asks for personal examples, give 2-3 SHORT ones from a normal high schooler's day. Spotify, YouTube, TikTok, Instagram, Google Docs, Notes app, school email, phone camera roll, a spreadsheet for a class project. Anything a real 16-17 year old actually touches.
-- Do NOT invent jobs, companies, paid projects, corporate datasets, sales figures, APIs, or anything that sounds like an adult at a tech company.
-- Do NOT stack 5-6 examples just to fill the space. 2-3 sentences is enough.
-- Sound like an 11th grader explaining something to a friend. Not a résumé. Not a report.
+REAL EXAMPLES ONLY — this is the most important rule:
+- If the question asks for personal examples, use things a real high schooler actually touches every day. Spotify playlists. YouTube. TikTok. Instagram. Google Docs. Notes app. Phone camera roll. School email. A school Chromebook. A shared Google Slides deck for a group project. Classroom assignments. Discord. A school spreadsheet for a science lab.
+- NEVER invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built, professional projects, or anything that sounds like an adult at a tech company. A high schooler doesn't have those.
+- Do NOT stack 5-6 examples just to fill space. 2-3 short ones is enough. Then answer the question.
+- If you're unsure whether an example is real, use a more generic one ("a playlist app", "a school spreadsheet", "my camera roll") rather than something specific and made up.
 
-LENGTH:
-- If no length was specified, keep each answer to 2-4 sentences. Short and real.
+TONE:
+- Write like you're explaining this to a friend, not writing a report for a business.
+- No filler phrases: "It's important to note", "plays a crucial role", "leverages", "facilitates".
+- No "In conclusion" or "In summary."
+
+FORMAT:
+- Write one answer per question, in order, separated by blank lines.
+- No headers, no labels, no "Question 1:", no "Answer:".
+- Just the answers.
 
 SOURCE QUESTIONS:
 """
@@ -940,7 +916,7 @@ ${lesson.title}
 ${sourceText}
 """
 ${submissionText && !short ? `\nASSIGNMENT CONTEXT:\n"""\n${submissionText.slice(0, 800)}\n"""\n` : ''}
-Return plain text only — just the answers, separated by blank lines. No JSON, no intro line, no headers.`;
+Return plain text only — just the answers, separated by blank lines.`;
 
     const tryOnce = async (source, short, temp, tokens) => {
       try {
@@ -963,7 +939,7 @@ Return plain text only — just the answers, separated by blank lines. No JSON, 
     if (raw) return raw;
 
     log('attempt 2 empty — trying minimal prompt');
-    const minimal = `Write a student reflection answering the questions below. ${lengthLine} Plain first-person prose, no headers, one answer per question separated by blank lines.
+    const minimal = `Write a student reflection answering the questions below. ${lengthLine} Plain first-person prose, no headers, one answer per question separated by blank lines. Use examples a real 11th grader would have — apps, school stuff, phone stuff. Nothing corporate.
 
 Questions:
 ${lesson.text.slice(0, 1200)}
@@ -1130,7 +1106,6 @@ Answers:`;
     humanClick(submit);
     await sleep(1800);
 
-    // handle confirmation dialog (mat-dialog, role=dialog, or modal overlay)
     const dialogScopes = [
       'mat-dialog-container', '[role="dialog"]', '.mat-mdc-dialog-surface',
       '.mdc-dialog', '.cdk-overlay-pane', '[class*="modal"]'
@@ -1150,7 +1125,6 @@ Answers:`;
       humanClick(confirmBtn);
       await sleep(2200);
     } else {
-      // fallback: any yes/confirm/ok button anywhere visible
       const anyConfirm = [...document.querySelectorAll('button, [role="button"]')]
         .find(b => b.offsetParent !== null && !b.disabled && !b.closest('#__hh_ui') &&
           /^(yes|confirm|ok|yes, submit|turn it in|turn in)$/i.test((b.textContent || '').trim()));
@@ -1161,21 +1135,18 @@ Answers:`;
       }
     }
 
-    // verify submit actually took — retry once if button still enabled and visible
     await sleep(900);
     submit = findSubmitButton();
     if (submit && !submit.disabled && submit.offsetParent !== null) {
       log('submit still enabled — retrying click');
       humanClick(submit);
       await sleep(1800);
-      // one more dialog pass
       const retryConfirm = [...document.querySelectorAll('button, [role="button"]')]
         .find(b => b.offsetParent !== null && !b.disabled && !b.closest('#__hh_ui') &&
           /^(yes|confirm|ok|yes, submit|turn it in|turn in)$/i.test((b.textContent || '').trim()));
       if (retryConfirm) { humanClick(retryConfirm); await sleep(2000); }
     }
 
-    // final check — if submit button is gone or disabled, we're done
     await sleep(1200);
     const stillThere = findSubmitButton();
     const submitted = !stillThere || stillThere.disabled || stillThere.offsetParent === null;
@@ -1463,7 +1434,6 @@ Answers:`;
       </div>
     `;
     document.body.appendChild(el);
-
     wireUI();
     render();
   }
@@ -1645,7 +1615,6 @@ Answers:`;
   ensureUI();
   log('helper ready · ' + CFG.ai.model);
 
-  // jittered continuous-mode ticker
   (function tick() {
     if (KILLED) return;
     setTimeout(async () => {
@@ -1835,7 +1804,7 @@ Include exact button names and URLs. If an account is required, note it. Keep ea
 
     return `Respond with a single JSON object and nothing else. First char must be {, last must be }.
 
-You are a real student completing a class assignment. Output is pasted verbatim into a submission box.
+You are a real 11th grade student completing a class assignment. Output is pasted verbatim into a submission box. You write like a normal high schooler — not an adult, not a chatbot, not a resume.
 
 === STRUCTURE ===
 Steps in order: ${steps.map(s => s.label).join(' | ')}
@@ -1850,9 +1819,8 @@ Assignment type: ${type}
 ${TYPE_INSTRUCTIONS[type] || TYPE_INSTRUCTIONS.written}
 
 === CONTENT ===
-CRITICAL — READ CAREFULLY:
 Imagine the reader is holding the finished document. They see the section heading. They want to read what's UNDER that heading.
-Your job is to write that content.
+Write that content.
 
 Do not reference the document. Do not name the section. Do not say "the template," "the introduction," "the proposal," "this section," "the document," or any variation.
 Do not describe what the section does, contains, or explains.
@@ -1863,8 +1831,14 @@ Start with the actual first sentence of content. End on the actual point.
 The label tells you where it goes. Do not write the label into the answer.
 Every deliverable references the student's project by actual name or clear descriptor.
 If a step has sub-questions, answer each inside that deliverable, in order.
-If the assignment step itself says "in this section include X, Y, Z" or "your introduction should explain X," that is NOT permission to describe the section. Write X, Y, Z and the explanation of X directly.
-Also ban reflective meta-tails at the end of a deliverable: "By stating these limits...", "Readers will see...", "This helps the project...". End on the actual point, not on a sentence describing the effect of the writing.
+If the assignment step itself says "in this section include X, Y, Z," write X, Y, Z as real sentences. Do not describe including them.
+Also ban reflective meta-tails at the end of a deliverable: "By stating these limits...", "Readers will see...", "This helps the project...". End on the actual point.
+
+=== EXAMPLES (this is the most important rule) ===
+If the assignment asks for personal examples, use things a real high schooler actually touches every day. Spotify playlists. YouTube. TikTok. Instagram. Google Docs. Notes app. Phone camera roll. School email. A school Chromebook. A shared Google Slides deck. Classroom assignments. Discord.
+Do NOT invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built, professional projects, or anything that sounds like an adult at a tech company.
+Do NOT stack 5-6 examples just to fill space. 2-3 short ones then answer the question.
+When in doubt, use generic terms ("a playlist app", "a school spreadsheet") rather than specific and made-up.
 
 === LENGTH ===
 If any step or prompt includes a length requirement (e.g. "100 words", "3-5 sentences", "at least 200 words"), obey it EXACTLY. Match the count. Do not fall short.
@@ -1873,7 +1847,7 @@ If no length is specified, keep each deliverable to 60-120 words.
 === VOICE ===
 10th grade reading level. Plain words. Short sentences.
 Contractions: I'm, it's, doesn't, can't, won't.
-Short sentences. One idea per sentence. No sentence over 20 words unless it needs to be.
+One idea per sentence. No sentence over 20 words unless it needs to be.
 Say "it", "my project", "my AI" — NEVER "the system", "the platform", "the AI application".
 No semicolons. No markdown headers. No **bold**. Plain prose.
 Bullets only if the step itself is a list prompt.
@@ -1908,13 +1882,13 @@ JSON only. No backticks. No commentary.`;
     const prompt = `Rewrite each numbered passage below so it contains ONLY the actual content — no references to any document, section, template, or introduction.
 
 Rules:
-- Delete any sentence that names a section, document, or template ("In the X section...", "The Y section of my template...", "My introduction...").
-- Delete any opening that describes the passage ("Reviewing my project, I...", "Looking at my...", "This section covers...").
-- Delete any closing that describes the passage's effect ("By doing this, I...", "This shows readers...", "This balance helps...").
+- Delete any sentence that names a section, document, or template.
+- Delete any opening that describes the passage.
+- Delete any closing that describes the passage's effect.
+- If any passage invents a fake adult experience (jobs, companies, paid work, datasets, corporate projects), replace with something a real high schooler would have (apps, school stuff, phone stuff). Keep it short.
 - Keep every concrete fact, task, weakness, mitigation, and example.
 - Keep first-person voice, plain language, contractions.
-- Preserve the word count as closely as possible. Do not shorten below the original length.
-- Do not add anything new. Do not summarize. Just remove the meta.
+- Preserve the word count as closely as possible.
 - If a passage is already clean, return it unchanged.
 
 Schema — return STRICT JSON only:
@@ -1960,7 +1934,7 @@ ${list}`;
       F.title = parsed.assignment_title || document.title || 'Assignment';
       F.deliverables = parsed.deliverables;
       if (detectedType === 'written') {
-        log('cleanup pass — stripping meta-narration');
+        log('cleanup pass — stripping meta-narration + fake examples');
         F.deliverables = await cleanDeliverables(F.deliverables);
         if (isDead()) return;
       }
