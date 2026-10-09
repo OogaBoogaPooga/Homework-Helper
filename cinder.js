@@ -29,7 +29,7 @@
 
   const CFG = {
     ai: {
-      key: saved.key || 'PASTE_YOUR_REAL_KEY_HERE',
+      key: saved.key || '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',
       model: saved.model || 'openai/gpt-oss-120b',
       url: 'https://api.groq.com/openai/v1/chat/completions',
       temperature: saved.temperature ?? 0.2,
