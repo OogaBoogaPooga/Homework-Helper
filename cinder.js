@@ -737,9 +737,6 @@ Reply with JSON only.`;
       }
     }
 
-    log('could not open comment box');
-    return null;
-  }
 
   function fillSubmissionBox(box, text) {
     if (!box) return false;
