@@ -762,13 +762,17 @@ Label each deliverable EXACTLY as the step label.
 Only merge steps whose labels are literally identical.
 
 === CONTENT ===
-CRITICAL: Write the ACTUAL CONTENT, not a description of it.
-Never use meta-language in any tense.
-- No past-tense narration: "I listed...", "I noted...", "I added...", "I described..."
-- No imperative narration: "List X", "Include Y", "Note Z", "Explain why...", "Add a section on..."
-- No future-should narration: "The introduction should state...", "The template must include..."
-If the assignment step itself is written as commands ("list X, include Y, note Z"), DO NOT pass those commands through. Execute them: write X as a sentence, write Y as a sentence, write Z as a sentence. The deliverable is the finished content, not the instruction set for producing it.
-If the step says "include X, Y, Z," just WRITE X, Y, Z as real sentences.
+CRITICAL — READ CAREFULLY:
+Imagine the reader is holding the finished document. They see the section heading. They want to read what's UNDER that heading.
+Your job is to write that content.
+
+Do not reference the document. Do not name the section. Do not say "the template," "the introduction," "the proposal," "this section," "the document," or any variation.
+Do not describe what the section does, contains, or explains.
+Do not open with "The [section name]..." or "This section..." or "My [document part]..."
+Do not close with reflective lines about what the section accomplishes ("By stating these limits...", "This helps readers understand...", "This balance shows...").
+
+Start with the actual first sentence of content. End on the actual point.
+The label tells you where it goes. Do not write the label into the answer.
 Every deliverable references the student's project by actual name or clear descriptor.
 If a step has sub-questions, answer each inside that deliverable, in order.
 100–250 words per deliverable. Don't pad, don't repeat.
