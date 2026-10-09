@@ -384,14 +384,33 @@ Reply with JSON only.`;
   }
 
   // ---- reading AFK ----
-  function detectReading() {
-    if (getQuestionBlocks().length) return false;
-    if (detectFlashcards()) return false;
-    const text = (document.body.innerText || '').toLowerCase();
-    const hasTimer = /\b\d{1,2}:\d{2}\b/.test(text) && /(remaining|timer|time left|minutes)/i.test(text);
-    const hasReadingWord = /\b(reading|article|chapter|passage|read the)\b/i.test(text);
-    const longEnough = text.length > 800;
-    return longEnough && (hasTimer || hasReadingWord);
+  function classifyPage() {
+    if (getQuestionBlocks().length) return 'quiz';
+    if (detectFlashcards()) return 'cards';
+
+    const title = (
+      (document.title || '') + ' ' +
+      (document.querySelector('h1, [role="heading"], .assignment-title')?.textContent || '')
+    ).toLowerCase();
+    const bodyHead = (document.body.innerText || '').slice(0, 2500).toLowerCase();
+
+    // assignment signals
+    if (/\b(assignment|submit|dropbox|rubric)\b/i.test(title)) return 'assignment';
+    if (/\b(submit (your|this|the) assignment|dropbox|rubric|grading criteria)\b/i.test(bodyHead)) return 'assignment';
+
+    // has real inputs → assignment-ish, don't AFK
+    const inputs = [...document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"]')]
+      .filter(t => t.offsetParent !== null);
+    if (inputs.length) return 'assignment';
+
+    // lesson signals
+    if (document.querySelector('video')) return 'lesson';
+    if (/\b(lesson|video|lecture|watch|reading)\b/i.test(title)) return 'lesson';
+
+    // long passive text → treat as lesson reading
+    if (bodyHead.length > 700 && !inputs.length) return 'lesson';
+
+    return 'unknown';
   }
 
   function inTopLeft(el) {
@@ -493,26 +512,76 @@ Reply with JSON only.`;
     });
   }
 
-  async function runReadingAFK() {
+  async function handlePassiveLesson() {
+    // If a video is present, mute it and play at 2x so any watch-time requirement counts.
+    const vid = document.querySelector('video');
+    if (vid) {
+      try {
+        vid.muted = true;
+        vid.playbackRate = 2;
+        if (vid.paused) await vid.play().catch(() => {});
+        log('video: muted, 2x');
+      } catch (e) { log('video play failed:', e.message); }
+    }
+
+    // Already done?
+    if (findCompletionIndicator()) { log('checkmark already there'); return true; }
+
+    log('waiting for checkmark…');
+    const completion = await Promise.race([
+      setupCompletionWatcher(),
+      new Promise(res => {
+        const iv = setInterval(() => { if (!S.running || KILLED) { clearInterval(iv); res(null); } }, 500);
+        killHooks.push(() => clearInterval(iv));
+      }),
+      (async () => { await sleep(10 * 60 * 1000); return null; })() // 10 min cap per lesson
+    ]);
+
+    if (completion) {
+      log('checkmark arrived');
+      await sleep(1500);
+      return true;
+    }
+    log('no checkmark after 10 min — moving on anyway');
+    return false;
+  }
+
+  async function runLessonChain() {
     S.running = true; S.busy = true; render();
-    log('reading AFK started — auto-scrolling until checkmark');
+    log('lesson chain started');
 
-    const completionPromise = setupCompletionWatcher();
     const startedAt = Date.now();
+    let advanced = 0;
 
-    const scrollLoop = (async () => {
-      while (S.running && !KILLED) {
-        if (Date.now() - startedAt > 60 * 60 * 1000) { log('AFK 1h timeout'); S.running = false; break; }
-        window.scrollBy({ top: randInt(80, 200), behavior: 'smooth' });
-        S.lastAnswer = `scrolling · ${Math.round(window.scrollY)}px`;
-        render();
-        await sleep(randInt(2800, 7000));
-        if (!S.running || KILLED) break;
-        if (Math.random() < 0.18) {
-          window.scrollBy({ top: -randInt(60, 180), behavior: 'smooth' });
-          await sleep(randInt(1200, 2600));
-        }
-      }
+    while (S.running && !KILLED) {
+      if (Date.now() - startedAt > 2 * 60 * 60 * 1000) { log('chain timeout (2h)'); break; }
+
+      const kind = classifyPage();
+      S.lastAnswer = `page: ${kind} · advanced ${advanced}`;
+      render();
+      log('page:', kind);
+
+      if (kind === 'quiz') { log('hit quiz — stopping chain. Click Start.'); break; }
+      if (kind === 'cards') { log('hit flashcards — stopping chain. Click Start.'); break; }
+      if (kind === 'assignment') { log('hit assignment — stopping chain. Run Forge.'); break; }
+      if (kind === 'unknown') { log('unknown page — stopping chain'); break; }
+
+      // lesson — AFK
+      await handlePassiveLesson();
+      if (!S.running || KILLED) break;
+
+      const nav = findNextAssignmentNav();
+      if (!nav) { log('no next-lesson nav — chain stopped'); break; }
+      humanClick(nav);
+      advanced++;
+      log(`→ advanced to lesson ${advanced + 1}`);
+      await sleep(3000);
+    }
+
+    S.running = false; S.busy = false;
+    render();
+    log(`chain stopped after ${advanced} advances`);
+  }
     })();
 
     const stopWatcher = new Promise(res => {
@@ -541,19 +610,32 @@ Reply with JSON only.`;
     if (KILLED) return;
     if (S.running) { stop(); return; }
 
-    if (getQuestionBlocks().length) { log('quiz — auto'); loop(); return; }
-    if (detectFlashcards()) { log('flashcards detected — card driver'); await runCards(); return; }
-    if (detectReading()) { log('reading page detected — AFK mode'); await runReadingAFK(); return; }
-
-    log('no quiz, cards, or reading — forge');
-    if (window.__forge?.run) {
-      const t = document.querySelector('#__hh_panel .hh-tab[data-tab="forge"]');
-      if (t) t.click();
-      window.__forge.run();
-    } else {
-      S.lastAnswer = 'Forge not loaded. Wait 2s and retry.';
-      render();
+    if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE' && classifyPage() === 'assignment') {
+      const k = prompt('Paste your Groq API key (starts with gsk_). It will be saved.');
+      if (k && k.trim()) { CFG.ai.key = k.trim(); saveCfg(); log('key saved'); }
     }
+
+    const kind = classifyPage();
+    log('startSmart →', kind);
+
+    if (kind === 'quiz') { log('quiz — auto'); loop(); return; }
+    if (kind === 'cards') { log('flashcards — card driver'); await runCards(); return; }
+    if (kind === 'lesson') { log('lesson — AFK chain'); await runLessonChain(); return; }
+    if (kind === 'assignment') {
+      log('assignment — forge');
+      if (window.__forge?.run) {
+        const t = document.querySelector('#__hh_panel .hh-tab[data-tab="forge"]');
+        if (t) t.click();
+        window.__forge.run();
+      } else {
+        S.lastAnswer = 'Forge not loaded. Wait 2s and retry.';
+        render();
+      }
+      return;
+    }
+    log('unknown page — nothing to do');
+    S.lastAnswer = 'Unknown page. Nothing to run.';
+    render();
   }
 
   // ---- chat ----
