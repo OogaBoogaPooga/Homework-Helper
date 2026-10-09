@@ -880,7 +880,7 @@ Reply with JSON only.`;
 
   async function generateAnswersForLesson(lesson, submissionText) {
     const lengthReq = parseLengthRequirement(lesson.text + '\n' + (submissionText || ''));
-    const lengthLine = describeLength(lengthReq) || 'Each answer should be roughly 60-120 words — short and to the point.';
+    const lengthLine = describeLength(lengthReq) || 'Match the length to what the question actually asks. See the LENGTH MATCHING rules below.';
     if (lengthReq) log('detected length requirement:', lengthReq.raw);
 
     const makePrompt = (sourceText, short) => `You are a real 11th grade student answering reflection questions for a class assignment. You write like a normal high schooler — not an adult, not a chatbot, not a resume.
@@ -909,6 +909,19 @@ FORMAT:
 - Write one answer per question, in order, separated by blank lines.
 - No headers, no labels, no "Question 1:", no "Answer:".
 - Just the answers.
+
+LENGTH MATCHING (read the question, pick the tier):
+- If a word/sentence/paragraph count is stated → follow it exactly. Overrides everything below.
+- Simple reflection, opinion, "what did you do," list-style, "name an example" → 2-3 sentences.
+- "Explain," "describe," "summarize," "what is X" → 3-5 sentences. One short paragraph.
+- "Analyze," "compare," "discuss why," "evaluate," "what would happen if," multi-part with 2+ sub-questions → 5-8 sentences. Still tight, still one paragraph, but more substance.
+- "Write an essay," "long-form response," "3 paragraphs" → honor the size the assignment implies.
+
+BANNED REGARDLESS OF TIER:
+- "For example, ..." as a padding sentence
+- Closing wrap-ups ("In the end, ...", "Overall, ...", "This shows that, ...")
+- Restating the question
+- Adding a 4th sub-point when the question asked for 2
 
 SOURCE QUESTIONS:
 """
