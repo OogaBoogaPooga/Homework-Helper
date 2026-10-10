@@ -1919,7 +1919,96 @@ Keep each step one action.`
     return lines.slice(idx[0], idx[idx.length - 1] + 1).join('\n').trim();
   }
 
+  // ---- Schoology-specific content extraction ----
+  function scrapeSchoology() {
+    const out = [];
+    const INSTRUCTION_RX = /instructions?:|answer (one|the following|the question)|using the (document|text|passage)|read the (following|passage)/i;
+
+    // Schoology's newer layout puts everything in #main-inner. Older layouts
+    // use #assignment-content*. Try specific first, fall back to broad.
+    const selectors = [
+      '#main-inner',
+      '#assignment-content-inner',
+      '#assignment-content',
+      '.assignment-content',
+      '.assignment-description',
+      'main',
+    ];
+
+    let best = null, bestScore = 0;
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (!el) continue;
+      const txt = cleanText(el.innerText || '');
+      if (txt.length < 80) continue;
+      // prefer containers with instructions, and prefer smaller (more specific)
+      const instrBoost = INSTRUCTION_RX.test(txt) ? 5000 : 0;
+      const score = instrBoost - txt.length * 0.001;
+      if (score > bestScore) { bestScore = score; best = { sel, txt }; }
+    }
+
+    if (best) {
+      const stripped = stripNav(best.txt);
+      log('schoology: matched', best.sel, '—', best.txt.length, '→', stripped.length, 'chars after strip');
+      if (stripped.length > 80) {
+        out.push({ label: 'Assignment', content: stripped.slice(0, 5000) });
+        return out;
+      }
+    }
+
+    // Deepest-container fallback
+    const all = [...document.querySelectorAll('div, section, article')];
+    const withInstr = all.filter(el => INSTRUCTION_RX.test(el.innerText || '') && (el.innerText || '').length > 300);
+    if (withInstr.length) {
+      withInstr.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+      const pick = withInstr[0];
+      const stripped = stripNav(cleanText(pick.innerText));
+      log('schoology: deepest container', stripped.length, 'chars');
+      if (stripped.length > 80) {
+        out.push({ label: 'Assignment', content: stripped.slice(0, 5000) });
+        return out;
+      }
+    }
+
+    return out;
+  }
+
+  function stripNav(text) {
+    const noise = [
+      /^Skip to Content$/i,
+      /^Courses$/i, /^Groups$/i, /^Resources$/i, /^More$/i,
+      /^Current Menu Item$/i,
+      /^Materials( Dropdown)?$/i,
+      /^(Updates|Grades|Mastery|Members|Information)$/i,
+      /^CodeAI$/i, /^Microsoft OneDrive$/i, /^Newsela$/i,
+      /^Teams Quick Meet$/i, /^Edpuzzle$/i,
+      /^Grading period$/i, /^Sandbox$/i,
+      /^PrevNext$/i, /^Folder\.$/i,
+      /^Immersive Reader$/i,
+      /^Grade:$/i, /^Grade:\s*N\/A$/i,
+      /^N\/A$/i, /^\d+$/,
+      /^APUSH:/i,
+      /^Week \d+:/i,                     // folder label
+    ];
+    const lines = text.split('\n').map(l => l.trimEnd());
+    // also strip leading "Week N Class Discussion" duplicate of title
+    const filtered = lines.filter(line => {
+      const t = line.trim();
+      if (!t) return true;
+      return !noise.some(rx => rx.test(t));
+    });
+    return filtered.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  
   async function scrapeAllSteps() {
+    // Schoology path first — different DOM
+    if (location.hostname.includes('schoology')) {
+      const sch = scrapeSchoology();
+      log('schoology scrape →', sch.length, 'block(s)');
+      if (sch.length) return sch;
+      // fall through to generic if Schoology selectors missed
+    }
+
     const tabs = findStepTabs();
     log('found', tabs.length, 'step tabs');
     const out = [];
@@ -1942,12 +2031,26 @@ Keep each step one action.`
         if (now !== prev) break;
       }
       const content = extractDelta(prev, now);
-      out.push({ label, content });
-      log('scraped:', label, content.length, 'chars');
+      // skip tabs with essentially no content
+      if (content.length >= 80) {
+        out.push({ label, content });
+        log('scraped:', label, content.length, 'chars');
+      } else {
+        log('skipped empty tab:', label);
+      }
       prev = now;
     }
     activeNow.click();
     await sleep(300);
+
+    // FALLBACK: if we got nothing useful, grab full body
+    if (!out.length || out.every(s => s.content.length < 80)) {
+      const body = cleanText(document.body.innerText);
+      if (body.length > 60) {
+        out.push({ label: 'Full Page', content: body.slice(0, 5000) });
+        log('fallback: full body text', body.length, 'chars');
+      }
+    }
     return out;
   }
 
@@ -1962,6 +2065,7 @@ Keep each step one action.`
 
   function buildPrompt(steps, ctx, style, fields, type, ocrText) {
     const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 1800)}`).join('\n\n');
+    The scraped text may contain Schoology navigation (Courses, Groups, Updates, Grades, Mastery, Materials, Members). IGNORE all of it. Only the assignment instructions and any source document matter.
     let pendingBlock = '';
     try {
       const raw = localStorage.getItem('__hh_pending_lesson');
@@ -1996,7 +2100,7 @@ Steps: ${steps.map(s => s.label).join(' | ')}
 Produce ONE deliverable per step.
 EXCEPTION: infographic / presentation = ONE artifact. Merge ALL steps into one deliverable.
 Skip "Overview"/"Introduction" if they only describe the assignment.
-If a step is under 80 chars, write "[no content scraped]".
+If a step is under 80 chars, ignore it and use the other steps.
 Label each deliverable EXACTLY as step label.
 
 === OUTPUT SHAPE ===
@@ -2030,6 +2134,7 @@ Bullets only if the step is a list prompt.
 Ban: furthermore, moreover, additionally, in conclusion, plays a crucial role, leverages, facilitates, underscores, optimal, robust.
 
 === ASSIGNMENT ===
+The scraped text may contain Schoology navigation (Courses, Groups...). IGNORE all of it...
 ${stepBlob}${pendingBlock}${ocrBlock}${ctxBlock}${styleBlock}${fieldsBlock}
 
 Schema:
