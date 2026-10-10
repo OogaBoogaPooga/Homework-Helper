@@ -177,12 +177,10 @@
 
   async function ocrPageImages() {
     if (!CFG.ocrEnabled || KILLED) return [];
-    // find large images that look like documents (not icons/avatars)
     const candidates = [...document.querySelectorAll('img')].filter(img => {
       if (img.offsetParent === null) return false;
       const r = img.getBoundingClientRect();
       if (r.width < 200 || r.height < 120) return false;
-      // skip if tiny by natural size too
       if (img.naturalWidth && img.naturalWidth < 200) return false;
       return true;
     });
@@ -274,7 +272,6 @@
     return '';
   }
 
-  // broadened question-text resolver: nearest preceding text block > 80 chars
   function nearestPrecedingText(el) {
     let cur = el;
     for (let depth = 0; depth < 10 && cur; depth++) {
@@ -289,7 +286,6 @@
       cur = cur.parentElement;
       if (!cur || cur.tagName === 'BODY') break;
     }
-    // last resort: nearest heading before the element
     const all = [...document.querySelectorAll('h1, h2, h3, h4, legend, p')];
     const r = el.getBoundingClientRect();
     let best = null, bestDist = Infinity;
@@ -335,7 +331,6 @@
       const t = (group.innerText || '').replace(/\s+/g, ' ').trim();
       if (t.length > 8 && t.length < 1500) return t.slice(0, 600);
     }
-    // NEW: nearest preceding text fallback
     const near = nearestPrecedingText(el);
     if (near) return near.slice(0, 600);
     return '';
@@ -370,7 +365,7 @@
   }
 
   // ============================================================
-  // GROQ
+  // GROQ API
   // ============================================================
   async function groqCall(messages, opts = {}) {
     if (KILLED) throw new Error('killed');
@@ -432,7 +427,6 @@
     return full;
   }
 
-  // retry wrapper — 2 attempts with exponential backoff, then bail on 429 storm
   async function groqCallRetry(messages, opts = {}, maxAttempts = 2) {
     let lastErr = null;
     for (let i = 0; i < maxAttempts; i++) {
@@ -485,7 +479,6 @@
     }
     try { return await attempt(true); }
     catch (e) {
-      // broadened JSON-failure detection
       const jf = e.status === 400 && (
         /json_validate_failed|Failed to generate JSON|Invalid response format|response_format|must contain the word "json"/i
           .test(e.message || '') ||
@@ -655,7 +648,6 @@ Reply with JSON only.`;
         if (picks.length) return { picks: [...new Set(picks)], why: (o.why || '').trim() };
       } catch {}
     }
-    // fallback: pick the first digit in range — safer than grabbing all digits
     const m = String(raw).match(/\b([1-9])\b/);
     if (m) {
       const n = parseInt(m[1], 10);
@@ -1156,93 +1148,52 @@ Reply with JSON only.`;
     }
   }
 
-  function parseLengthRequirement(text) {
-    const t = (text || '').toLowerCase();
-    let m = t.match(/at\s+least\s+(\d+)\s+words?/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
-    m = t.match(/minimum\s+(?:of\s+)?(\d+)\s+words?/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
-    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+words?/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
-    m = t.match(/no\s+more\s+than\s+(\d+)\s+words?/); if (m) return { kind: 'words', min: null, max: parseInt(m[1], 10), raw: m[0] };
-    m = t.match(/(\d+)\s+words?\s*(?:each|per|minimum|max|maximum)/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
-    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+sentences?/); if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
-    m = t.match(/at\s+least\s+(\d+)\s+sentences?/); if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: null, raw: m[0] };
-    m = t.match(/(\d+)\s+sentences?\s*(?:each|per|minimum)/); if (m) return { kind: 'sentences', min: parseInt(m[1], 10), max: null, raw: m[0] };
-    m = t.match(/(\d+)\s*(?:-|–|to)\s*(\d+)\s+paragraphs?/); if (m) return { kind: 'paragraphs', min: parseInt(m[1], 10), max: parseInt(m[2], 10), raw: m[0] };
-    m = t.match(/(\d+)\s+paragraphs?/); if (m) return { kind: 'paragraphs', min: parseInt(m[1], 10), max: parseInt(m[1], 10), raw: m[0] };
-    return null;
-  }
-  function describeLength(req) {
-    if (!req) return '';
-    if (req.kind === 'words') {
-      if (req.min && req.max) return `Each answer must be between ${req.min} and ${req.max} words.`;
-      if (req.min) return `Each answer must be AT LEAST ${req.min} words.`;
-      if (req.max) return `Each answer must be under ${req.max} words.`;
-    }
-    if (req.kind === 'sentences') {
-      if (req.min && req.max) return `Each answer must be ${req.min} to ${req.max} sentences long.`;
-      if (req.min) return `Each answer must be at least ${req.min} sentences long.`;
-    }
-    if (req.kind === 'paragraphs') {
-      if (req.min && req.max) return `Each answer must be ${req.min} to ${req.max} paragraphs.`;
-      if (req.min) return `Each answer must be at least ${req.min} paragraph(s).`;
-    }
-    return '';
-  }
-
   async function generateAnswersForLesson(lesson, submissionText) {
-    const lengthReq = parseLengthRequirement(lesson.text + '\n' + (submissionText || ''));
-    const lengthLine = describeLength(lengthReq) || 'Match the length to what the question actually asks.';
-    if (lengthReq) log('detected length requirement:', lengthReq.raw);
-
-    const makePrompt = (sourceText, short) => `You are a real 11th grade student answering reflection questions for a class assignment. You write like a normal high schooler — not an adult, not a chatbot, not a resume.
+    const makePrompt = (sourceText) => `You are a real 11th grade student answering reflection questions for a class assignment. You write like a normal high schooler — not an adult, not a chatbot.
 
 VOICE:
 - Plain words. Short sentences. No semicolons. No markdown. No bullet lists.
 - Contractions: I'm, it's, doesn't, can't, won't.
-- Say "it", "my project", "I". Never "the system" or "the AI application."
+- Say "it", "my project", "I". Never "the system."
 - Answer the actual question. Don't restate it.
 
 REAL EXAMPLES ONLY:
-- If the question asks for personal examples, use things a real high schooler actually touches every day. Spotify playlists. YouTube. TikTok. Instagram. Google Docs. Notes app. Phone camera roll. School email. A school Chromebook. Shared Google Slides. Discord.
-- NEVER invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built, or anything that sounds like an adult at a tech company.
-- 2-3 short examples max. Don't stack to fill space.
+- Use things a real high schooler actually touches: Spotify, YouTube, TikTok, Instagram, Google Docs, Notes app, school email, Chromebook.
+- NEVER invent jobs, companies, paid work, sales figures, corporate datasets.
+- 2-3 short examples max.
 
 FORMAT:
-- Write one answer per question, in order, separated by blank lines.
-- No headers, no labels, no "Question 1:", no "Answer:".
+- One answer per question, in order, separated by blank lines.
+- No headers, no labels.
 
-LENGTH MATCHING:
-- If a word/sentence/paragraph count is stated → follow it exactly.
-- Simple reflection, opinion, list, "name an example" → 2-3 sentences.
-- "Explain," "describe," "summarize," "what is X" → 3-5 sentences.
-- "Analyze," "compare," "discuss why," "evaluate," multi-part → 5-8 sentences.
+LENGTH:
+- Simple reflection → 2-3 sentences. "Explain" → 3-5. "Analyze" → 5-8.
 
 BANNED:
 - "For example, ..." as padding
 - Closing wrap-ups ("In the end, ...", "Overall, ...")
 - Restating the question
-- Extra sub-points beyond what was asked
 
 SOURCE QUESTIONS:
 """
 ${lesson.title}
 ${sourceText}
 """
-${submissionText && !short ? `\nASSIGNMENT CONTEXT:\n"""\n${submissionText.slice(0, 800)}\n"""\n` : ''}
 Return plain text only — answers separated by blank lines.`;
 
-    const tryOnce = async (source, short, temp, tokens) => {
+    const tryOnce = async (source, tokens, temp) => {
       try {
-        const raw = await groqCall([{ role: 'user', content: makePrompt(source, short) }], { maxTokens: tokens, temperature: temp });
+        const raw = await groqCall([{ role: 'user', content: makePrompt(source) }], { maxTokens: tokens, temperature: temp });
         return (raw || '').trim();
       } catch (e) { log('fill attempt failed:', e.message); return ''; }
     };
 
-    let raw = await tryOnce(lesson.text.slice(0, 2800), false, 0.4, 6000);
+    let raw = await tryOnce(lesson.text.slice(0, 2800), 6000, 0.4);
     if (raw) return raw;
     log('attempt 1 empty — shorter context');
-    raw = await tryOnce(lesson.text.slice(0, 1400), true, 0.3, 6000);
+    raw = await tryOnce(lesson.text.slice(0, 1400), 6000, 0.3);
     if (raw) return raw;
-    log('attempt 2 empty — minimal prompt');
+    log('attempt 2 empty — minimal');
     const minimal = `Write a student reflection answering the questions below. Plain first-person prose, one answer per question separated by blank lines. Use examples a real 11th grader would have.
 
 Questions:
@@ -1250,16 +1201,7 @@ ${lesson.text.slice(0, 1200)}
 
 Answers:`;
     try { raw = await groqCall([{ role: 'user', content: minimal }], { maxTokens: 6000, temperature: 0.5 }); raw = (raw || '').trim(); } catch (e) { log('attempt 3 failed:', e.message); }
-    if (raw) return raw;
-    if (CFG.ai.model !== 'llama-3.3-70b-versatile') {
-      log('trying llama-3.3-70b-versatile');
-      const prev = CFG.ai.model;
-      CFG.ai.model = 'llama-3.3-70b-versatile';
-      try { raw = await groqCall([{ role: 'user', content: minimal }], { maxTokens: 6000, temperature: 0.4 }); raw = (raw || '').trim(); } catch (e) { log('llama failed:', e.message); }
-      if (raw) return raw;
-      CFG.ai.model = prev;
-    }
-    return '';
+    return raw || '';
   }
 
   function showFillPopup(lesson, answers, boxFound) {
@@ -1690,7 +1632,6 @@ Answers:`;
     try { S.running = false; S.busy = false; __continuous = false; } catch {}
     try { ABORT.abort(); } catch {}
     try { clrAll(); } catch {}
-    // drain killHooks — no accumulation across re-pastes
     try {
       const hooks = window.__helperKillHooks || [];
       for (const h of hooks) { try { h(); } catch {} }
@@ -1839,8 +1780,7 @@ Answers:`;
   function detectType(text) {
     const t = (text || '').toLowerCase();
     if (/\b(infographic|one[\s-]?pager|poster|brochure|flyer)\b/i.test(t)) return 'infographic';
-    if (/\b(canva|word|google\s*docs)\s+(to\s+)?(make|create|build|design)/i.test(t) && /\b(infographic|poster|brochure|flyer)\b/i.test(t)) return 'infographic';
-    if (/\b(canva|canva\.com)\b/i.test(t) || /\buse\s+canva\b/i.test(t) || /\bopen\s+canva\b/i.test(t) || /\bcreate.*?\bin\s+canva\b/i.test(t)) return 'canva';
+    if (/\b(canva|canva\.com)\b/i.test(t) || /\buse\s+canva\b/i.test(t)) return 'canva';
     if (/\b(saq|short[\s-]?answer|ace\s+format)\b/i.test(t)) return 'saq';
     if (/\b(slide|slides|presentation|powerpoint|google slides|deck|slideshow)\b/.test(t)) return 'presentation';
     if (/\b(flashcard|flash card|quizlet|anki|term and definition|vocab card)\b/.test(t)) return 'flashcards';
@@ -1850,24 +1790,27 @@ Answers:`;
   }
 
   const TYPE_INSTRUCTIONS = {
-    written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable unless a length is specified. No bullets unless the step itself is a list prompt.`,
-    saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use ACE: Answer directly, Cite evidence, Explain the connection.
+    written: `Flowing prose. Multiple paragraphs okay. 60–120 words per deliverable unless a length is stated. No bullets.`,
 
-QUOTE RULE (about quotes only, not content): When you put text in quotation marks, it must be a line that appears VERBATIM in the source text below. Do NOT invent quotes from your memory of the full document. If a line is not in the source text, do not put quotation marks around it — say it in your own words instead.
+    saq: `Short-answer response using ACE format: Answer directly, Cite evidence, Explain the connection.
 
-CONTENT RULE: You may use the full source text for context, framing, and explanation. A question about historical situation, purpose, or significance can be answered with context sentences in your own words — you just cannot pretend those sentences are quotes.
+QUOTE RULE: Anything you put in quotation marks must appear VERBATIM in the source text below. Do not invent quotes from memory. If a line is not in the source, paraphrase in your own words without quotes.
 
-NEVER REFUSE. Never say "the source text does not contain..." — that is not an acceptable answer. If no direct quote fits, answer in your own words with context from the text and cite whatever line comes closest, or cite nothing. A partial answer in your own words is always better than a refusal.
+CONTENT RULE: You may use the full source for context, framing, and explanation. A question about historical situation, purpose, or significance can be answered with context sentences in your own words.
+
+NEVER REFUSE. Never write "the source text does not contain..." — that is not an answer. If no quote fits, answer in your own words and paraphrase the source. A partial answer in your own words is always better than a refusal.
+
+Do NOT end with a sentence describing what your evidence shows or proves ("The evidence shows...", "This proves that..."). End on the point itself.
 
 Structure (4-6 sentences):
-1. Direct answer to the question, in your own words.
-2. A quote (from the verified list, if one exists) OR a paraphrase of the source in your own words.
-3. A second piece of evidence from the source, quoted or paraphrased.
-4. Explain how the evidence proves your answer.
+1. Direct answer to the question.
+2. A quote (from the verified list, if one exists) OR a paraphrase.
+3. A second piece of evidence — quoted or paraphrased.
+4. Why it matters, stated directly. No meta-narration.
 
 No bullets, no headers, no "In conclusion".`,
-    
-    infographic: `OUTPUT SHAPE: ONE deliverable — a content plan. NOT steps like "open Canva". Give the CONTENT.
+
+    infographic: `ONE deliverable — a content plan, not steps.
 
 TITLE: <short, punchy title>
 
@@ -1884,38 +1827,43 @@ Heading: <exact heading to type>
 Text: <2-3 sentences>
 
 VISUAL NOTES:
-- Icon ideas per section
+- Icon ideas
 - Color palette (2-3 colors)
 - Layout hint
 
-ONE deliverable. Merge all steps if steps are listed.`,
-    presentation: `OUTPUT SHAPE: Slide-by-slide.
+Merge all steps into one deliverable.`,
+
+    presentation: `Slide-by-slide.
 Slide 1: <title>
 - bullet
 - bullet
 Speaker notes: one sentence
 
-Aim for 5–8 slides unless count specified. Bullets under 12 words.`,
-    canva: `OUTPUT SHAPE: Numbered build steps:
+5–8 slides unless stated. Bullets under 12 words.`,
+
+    canva: `Numbered build steps:
 1. Open Canva → search "<template>" → pick clean template.
 2. Title text: "<exact text>"
 3. Slide 2: <content>
-4. Element to add: <icon/photo idea>
+4. Element to add: <icon idea>
 5. Colors: <2-3>
 Give exact text to type.`,
-    flashcards: `OUTPUT SHAPE: Numbered term/definition pairs.
+
+    flashcards: `Numbered term/definition pairs.
 1. Term: "<term>"
    Definition: "<one-sentence>"
-Give 8–15 cards unless count specified.`,
-    video: `OUTPUT SHAPE: Script.
+8–15 cards unless stated.`,
+
+    video: `Script.
 [0:00] <what to say>
 [0:15] <next beat>
 Include what to show on screen.`,
-    walkthrough: `OUTPUT SHAPE: Numbered navigation steps.
+
+    walkthrough: `Numbered navigation steps.
 1. Go to <url>.
 2. Click "<label>".
 3. Enter <what>.
-Keep each step one action.`
+One action per step.`
   };
 
   function findStepTabs() {
@@ -1934,13 +1882,10 @@ Keep each step one action.`
     return lines.slice(idx[0], idx[idx.length - 1] + 1).join('\n').trim();
   }
 
-  // ---- Schoology-specific content extraction ----
   function scrapeSchoology() {
     const out = [];
     const INSTRUCTION_RX = /instructions?:|answer (one|the following|the question)|using the (document|text|passage)|read the (following|passage)/i;
 
-    // Schoology's newer layout puts everything in #main-inner. Older layouts
-    // use #assignment-content*. Try specific first, fall back to broad.
     const selectors = [
       '#main-inner',
       '#assignment-content-inner',
@@ -1956,7 +1901,6 @@ Keep each step one action.`
       if (!el) continue;
       const txt = cleanText(el.innerText || '');
       if (txt.length < 80) continue;
-      // prefer containers with instructions, and prefer smaller (more specific)
       const instrBoost = INSTRUCTION_RX.test(txt) ? 5000 : 0;
       const score = instrBoost - txt.length * 0.001;
       if (score > bestScore) { bestScore = score; best = { sel, txt }; }
@@ -1971,7 +1915,6 @@ Keep each step one action.`
       }
     }
 
-    // Deepest-container fallback
     const all = [...document.querySelectorAll('div, section, article')];
     const withInstr = all.filter(el => INSTRUCTION_RX.test(el.innerText || '') && (el.innerText || '').length > 300);
     if (withInstr.length) {
@@ -2003,10 +1946,9 @@ Keep each step one action.`
       /^Grade:$/i, /^Grade:\s*N\/A$/i,
       /^N\/A$/i, /^\d+$/,
       /^APUSH:/i,
-      /^Week \d+:/i,                     // folder label
+      /^Week \d+:/i,
     ];
     const lines = text.split('\n').map(l => l.trimEnd());
-    // also strip leading "Week N Class Discussion" duplicate of title
     const filtered = lines.filter(line => {
       const t = line.trim();
       if (!t) return true;
@@ -2014,13 +1956,12 @@ Keep each step one action.`
     });
     return filtered.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
+
   function extractQuotableLines(sourceText) {
-    // split into sentence-ish chunks
     const chunks = String(sourceText)
       .split(/\n|(?<=[.?!])\s+(?=[A-Z"“])/)
       .map(l => l.trim())
       .filter(l => l.length > 40 && l.length < 400);
-    // keep the ones that look like actual grievances / evidence
     const lines = chunks.filter(l =>
       /[""][^""]{30,}[""]/.test(l) ||
       /\bHe has\b|\bShe has\b|\bThey have\b|\bWe have\b/.test(l) ||
@@ -2037,14 +1978,12 @@ Keep each step one action.`
     }
     return out;
   }
-  
+
   async function scrapeAllSteps() {
-    // Schoology path first — different DOM
     if (location.hostname.includes('schoology')) {
       const sch = scrapeSchoology();
       log('schoology scrape →', sch.length, 'block(s)');
       if (sch.length) return sch;
-      // fall through to generic if Schoology selectors missed
     }
 
     const tabs = findStepTabs();
@@ -2069,7 +2008,6 @@ Keep each step one action.`
         if (now !== prev) break;
       }
       const content = extractDelta(prev, now);
-      // skip tabs with essentially no content
       if (content.length >= 80) {
         out.push({ label, content });
         log('scraped:', label, content.length, 'chars');
@@ -2081,7 +2019,6 @@ Keep each step one action.`
     activeNow.click();
     await sleep(300);
 
-    // FALLBACK: if we got nothing useful, grab full body
     if (!out.length || out.every(s => s.content.length < 80)) {
       const body = cleanText(document.body.innerText);
       if (body.length > 60) {
@@ -2111,18 +2048,17 @@ Keep each step one action.`
         if (p && p.ts && (Date.now() - p.ts) < 30 * 60 * 1000) {
           pendingBlock = `\n\nPRIOR LESSON CONTEXT:\n"""\n${p.title}\n---\n${p.text.slice(0, 2500)}\n"""\n`;
           localStorage.removeItem('__hh_pending_lesson');
-          log('using stashed lesson context:', p.title);
         }
       }
     } catch {}
 
     const ocrBlock = (ocrText && ocrText.length)
-      ? `\n\nTEXT EXTRACTED FROM IMAGES ON THE PAGE (OCR — treat as primary source):\n"""\n${ocrText.join('\n\n---\n\n').slice(0, 4000)}\n"""`
+      ? `\n\nTEXT EXTRACTED FROM IMAGES (OCR — treat as primary source):\n"""\n${ocrText.join('\n\n---\n\n').slice(0, 4000)}\n"""`
       : '';
 
     const ctxBlock = ctx && ctx.trim()
-      ? `\n\nSTUDENT'S PROJECT (for reference only — do not force references to it if the assignment doesn't ask):\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
-      : `\n\nNOTE: No student project was provided. If the assignment doesn't mention a personal project, ignore this note entirely and answer from the assignment text itself. Do not output any placeholder text.`;
+      ? `\n\nSTUDENT'S PROJECT (only if assignment mentions one):\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
+      : '';
     const styleBlock = style && style.trim() ? `\n\nSTUDENT'S VOICE SAMPLE:\n"""\n${style.trim().slice(0, 1400)}\n"""` : '';
     const fieldsBlock = fields.length
       ? `\n\nEXISTING TEXT ON PAGE:\n` + fields.map((f, i) => `[field ${i + 1}${f.hint ? ' — ' + f.hint : ''}]\n${f.value}`).join('\n\n')
@@ -2130,57 +2066,54 @@ Keep each step one action.`
 
     const quotable = extractQuotableLines(stepBlob);
     const quotableBlock = quotable.length
-      ? `\n\n=== VERIFIED QUOTES (use ONLY these when you put text in quotation marks) ===\nThe lines below are the ONLY strings you may place inside quotation marks. Everything else must be written in your own words — no quotes around paraphrases.\n\nThis is about QUOTES only. You may still use the full source text above for context, framing, and explanation.\n\n` +
+      ? `\n\n=== VERIFIED QUOTES (use ONLY these when you put text in quotation marks) ===\nThese are the ONLY strings you may place inside quotation marks. Everything else must be in your own words.\nThis is about QUOTES only — you may still use the full source above for context and explanation.\n\n` +
         quotable.map((l, i) => `[${i + 1}] ${l}`).join('\n')
       : '';
 
     return `Respond with a single JSON object. First char {, last char }.
 
 You are a real 11th grade student. Output is pasted verbatim. You write like a normal high schooler.
-The ASSIGNMENT section below is the complete assignment — it contains the instructions, any source documents, and the questions. Everything you need to answer is already there. Do not output placeholders like "[NEED ...]" — that is never the correct answer. If something seems missing, answer with what you have.
+The ASSIGNMENT section below contains the instructions, the source document, and the questions. Everything you need is here. Do not output placeholders in square brackets — that is never the correct answer.
 
 === STRUCTURE ===
 Steps: ${steps.map(s => s.label).join(' | ')}
-Produce ONE deliverable per step.
-EXCEPTION: infographic / presentation = ONE artifact. Merge ALL steps into one deliverable.
+ONE deliverable per step.
+EXCEPTION: infographic / presentation = ONE artifact. Merge all steps.
 Skip "Overview"/"Introduction" if they only describe the assignment.
-If a step is under 80 chars, ignore it and use the other steps.
+If a step is under 80 chars, ignore it.
 Label each deliverable EXACTLY as step label.
-If the assignment says "label which question you answer", pick ONE question (a, b, or c) and prefix the answer with that letter and a period, e.g. "a. The Declaration was written...". Do not answer more than one unless told to.
+If the assignment says "label which question you answer", pick ONE question (a, b, or c) and prefix the answer with that letter and a period, e.g. "a. The Declaration was written...". Do not answer more than one.
+Question-selection: prefer the question that can be answered with actual quotes from the source document. Evidence and purpose questions usually beat historical-situation questions when the source is a primary document — because the document IS the evidence.
 
 === OUTPUT SHAPE ===
 Type: ${type}
 ${TYPE_INSTRUCTIONS[type] || TYPE_INSTRUCTIONS.written}
 
 === CONTENT ===
-Write the actual content the reader reads UNDER the heading.
-Do not name the section, template, introduction, or document.
-Do not describe what the section does.
+Write the content the reader reads, not meta-description of it.
+Do not name the section, template, or document.
 Do not close with reflective meta-tails.
-If the assignment is about a personal project, every deliverable references that project. If the assignment is document-based (SAQ, DBQ, reading analysis, source questions, history), ignore the project rule entirely — answer from the source document in the assignment text.
-Sub-questions answered in order inside the deliverable.
-If a step says "include X, Y, Z," write X, Y, Z.
+If the assignment is about a personal project, reference it. If it's document-based (SAQ, DBQ, reading analysis, history), answer from the source document — ignore project references.
 
 === EXAMPLES ===
-Use things a real high schooler touches: Spotify, YouTube, TikTok, Instagram, Google Docs, Notes app, camera roll, school email, Chromebook, shared Slides.
-NEVER invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built.
-2-3 short examples max.
-When unsure, generic ("a playlist app", "a school spreadsheet").
+Real high schooler things: Spotify, YouTube, TikTok, Instagram, Google Docs, Notes app, camera roll, school email, Chromebook, shared Slides.
+NEVER invent jobs, companies, paid work, sales figures, corporate datasets.
+2-3 examples max.
 
 === LENGTH ===
-If a length is stated, obey it exactly. Otherwise 60-120 words.
+If a length is stated, obey exactly. Otherwise 60-120 words.
 
 === VOICE ===
 10th grade level. Plain words. Short sentences.
 Contractions. One idea per sentence.
-Say "it", "my project", "my AI" — never "the system" or "the platform".
-No semicolons, no markdown headers, no bold.
+Say "it", "my project" — never "the system."
+No semicolons, no markdown, no bold.
 Bullets only if the step is a list prompt.
 Ban: furthermore, moreover, additionally, in conclusion, plays a crucial role, leverages, facilitates, underscores, optimal, robust.
 
 === ASSIGNMENT ===
-The scraped text may contain Schoology navigation (Courses, Groups, Updates, Grades, Mastery, Materials, Members). IGNORE all of it. Only the assignment instructions and any source document matter. Only answer the actual assignment question; ignore dashboard chrome.
-NEVER refuse to answer. If a direct quote isn't on the verified list, answer in your own words from the source text. A partial answer is always better than a refusal.
+IGNORE any Schoology navigation in the scraped text (Courses, Groups, Updates, Grades, Mastery, Materials, Members).
+Answer in your own words from the source text. Never refuse. A partial answer is always better than a refusal.
 ${quotableBlock}
 ${stepBlob}${pendingBlock}${ocrBlock}${ctxBlock}${styleBlock}${fieldsBlock}
 
@@ -2198,42 +2131,7 @@ JSON only.`;
     return o;
   }
 
-  async function cleanDeliverables(deliverables) {
-    if (!deliverables.length) return deliverables;
-    const list = deliverables.map((d, i) => `[${i}]\n${d.answer}`).join('\n\n---\n\n');
-    const prompt = `Rewrite each passage to remove meta-narration and fake adult examples.
-
-Rules:
-- Delete any sentence naming a section/document/template.
-- Delete openings that describe the passage.
-- Delete closings that describe the passage's effect.
-- Replace fake adult examples (jobs, companies, paid work, datasets) with high schooler things (apps, school stuff, phone stuff).
-- Keep every concrete fact, example, weakness, mitigation.
-- Preserve word count as closely as possible.
-- If a passage is already clean, return unchanged.
-
-Schema: {"items":["<rewritten 0>","<rewritten 1>",...]}
-
-Passages:
-${list}`;
-    try {
-      const raw = await C.groqJson(prompt, 5000);
-      let s = String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-      const m = s.match(/\{[\s\S]*\}/);
-      if (!m) return deliverables;
-      const o = JSON.parse(m[0]);
-      if (!Array.isArray(o.items) || o.items.length !== deliverables.length) return deliverables;
-      return deliverables.map((d, i) => {
-        const rewritten = String(o.items[i] || '').trim();
-        // only accept the rewrite if it's substantial — protects against the
-        // model returning empty/whitespace/single-char strings
-        return { ...d, answer: rewritten.length >= 20 ? rewritten : d.answer };
-      });
-    } catch (e) {
-      log('cleanup failed:', e.message);
-      return deliverables;
-    }
-  }
+  const PLACEHOLDER_RX = /\[(NEED|REQUIRES?|INSERT|MISSING|PENDING|SOURCE TEXT|PROJECT CONTEXT)[^\]]*\]/i;
 
   async function forge() {
     if (F.running || isDead()) return;
@@ -2247,7 +2145,6 @@ ${list}`;
         F.deliverables = [{ label: 'Error', answer: 'No assignment content detected.' }];
         renderForge(); return;
       }
-      // OCR pass — pull text out of images on the page
       let ocrText = [];
       try { ocrText = await C.ocrPageImages?.() || []; } catch (e) { log('OCR skipped:', e.message); }
       F.ocrText = ocrText;
@@ -2259,26 +2156,24 @@ ${list}`;
       log('type:', detectedType);
       const prompt = buildPrompt(steps, Ctx.project, Ctx.style, fields, detectedType, ocrText);
       log('prompt', prompt.length, 'chars');
-      const PLACEHOLDER_RX = /\[(NEED|REQUIRES?|INSERT|MISSING|PENDING|SOURCE TEXT|PROJECT CONTEXT)[^\]]*\]/i;
 
-      async function generateOnce(p) {
+      const generateOnce = async (p) => {
         const r = await C.groqJson(p, 5000);
         if (isDead()) return null;
         log('[solve] raw response length:', r.length);
         log('[solve] raw response head:', r.slice(0, 400));
         return parse(r);
-      }
+      };
 
       let parsed = await generateOnce(prompt);
-      if (isDead()) return;
+      if (isDead() || !parsed) return;
 
       const anyPlaceholder = parsed.deliverables.some(d => PLACEHOLDER_RX.test(d.answer || ''));
       if (anyPlaceholder) {
-        log('[solve] placeholder detected — retrying with correction prompt');
-        const correctionPrompt = prompt +
-          `\n\n=== CORRECTION ===\nYour previous response contained a placeholder like "[NEED SOURCE TEXT]" or similar. That is NOT acceptable output. The ASSIGNMENT section above contains the full instructions and the source document. Answer the actual question right now, in real sentences, in your own words. If you cannot quote, paraphrase. If you cannot paraphrase, describe. NEVER output anything in square brackets.`;
-        parsed = await generateOnce(correctionPrompt);
-        if (isDead()) return;
+        log('[solve] placeholder detected — retrying');
+        const correction = prompt + `\n\n=== CORRECTION ===\nYour previous response contained a bracketed placeholder. That is NOT acceptable. The ASSIGNMENT section above contains everything you need. Answer the actual question in real sentences right now, in your own words. If you cannot quote, paraphrase. If you cannot paraphrase, describe. NEVER output anything in square brackets.`;
+        parsed = await generateOnce(correction);
+        if (isDead() || !parsed) return;
       }
 
       parsed.deliverables = parsed.deliverables.map(d => ({
@@ -2289,14 +2184,9 @@ ${list}`;
       log('[solve] parsed deliverables:', parsed.deliverables.map(d => ({ label: d.label, answerLen: (d.answer || '').length })));
       F.title = parsed.assignment_title || document.title || 'Assignment';
       F.deliverables = parsed.deliverables;
-      if (detectedType === 'written' || detectedType === 'saq') {
-        log('cleanup pass');
-        F.deliverables = await cleanDeliverables(F.deliverables);
-        if (isDead()) return;
-      }
       F.history.unshift({ ts: Date.now(), title: F.title, steps: steps.length, deliverables: F.deliverables });
       F.history = F.history.slice(0, 30);
-      try { localStorage.setItem(LS_HIS, JSON.stringify(F.history)); } catch (e) { log('history save failed (quota?):', e.message); }
+      try { localStorage.setItem(LS_HIS, JSON.stringify(F.history)); } catch (e) { log('history save failed:', e.message); }
       log('solved', F.deliverables.length, 'in', ((Date.now() - t0) / 1000).toFixed(1) + 's');
     } catch (e) {
       if (isDead() || e.message === 'killed') return;
@@ -2309,19 +2199,14 @@ ${list}`;
   }
 
   // ============================================================
-  // SUBMIT — find submission box, paste plain text, confirm
+  // SUBMIT
   // ============================================================
   function findSubmissionBox() {
-    // Look for a large textarea or contenteditable that could accept the answer
     const cands = [...document.querySelectorAll('textarea, [contenteditable="true"]')]
       .filter(el => el.offsetParent !== null && !el.closest('#__hh_ui'))
-      .map(el => {
-        const r = el.getBoundingClientRect();
-        return { el, r };
-      })
+      .map(el => ({ el, r: el.getBoundingClientRect() }))
       .filter(x => x.r.width > 150 && x.r.height > 40);
     if (!cands.length) return null;
-    // pick the largest (most likely the answer field, not a comment box)
     cands.sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
     return cands[0].el;
   }
@@ -2329,7 +2214,6 @@ ${list}`;
   async function openSubmissionIfNeeded() {
     let box = findSubmissionBox();
     if (box) return box;
-    // try common "start writing" triggers
     const rx = /add (submission|response|answer)|start (writing|typing)|write (a )?response|write (your )?answer|enter (your )?response|add comment|begin/i;
     const triggers = [...document.querySelectorAll('button, a, [role="button"]')]
       .filter(el => el.offsetParent !== null && !el.closest('#__hh_ui'))
@@ -2356,9 +2240,7 @@ ${list}`;
         box.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
       }
-      // contenteditable: clear, then paste as plain text
       try { document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); } catch {}
-      // use execCommand insertText with plain string — avoids rich paste
       const ok = document.execCommand('insertText', false, text);
       if (!ok) box.innerText = text;
       box.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
@@ -2376,52 +2258,25 @@ ${list}`;
     const text = F.deliverables.map(d => `[${d.label}]\n${d.answer}`).join('\n\n');
     log('submit: looking for box…');
     const box = await openSubmissionIfNeeded();
-    if (!box) { log('no submission box found'); try { C.log('[solve] no box'); } catch {} return; }
+    if (!box) { log('no submission box found'); return; }
     log('submit: pasting', text.length, 'chars');
     const ok = await pastePlainText(box, text);
     if (!ok) { log('paste failed'); return; }
     log('submit: paste ok — showing confirm');
-    // reuse fill popup for confirmation
     const lesson = { title: F.title || 'Assignment', text: F.deliverables.map(d => d.label).join('\n') };
     const choice = await new Promise(resolve => {
-      // inline: use C.showFillPopup if exposed, else fall back to confirm
       if (typeof window !== 'undefined' && C.showFillPopup) { C.showFillPopup(lesson, text, true).then(resolve); return; }
-      // fallback popup
-      const el = document.createElement('div');
-      el.id = '__hh_fill_popup';
-      el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;width:min(720px,92vw);background:#1a1a1a;color:#f0f0f0;border:2px solid #e07b39;border-radius:12px;font:13px/1.5 sans-serif;box-shadow:0 12px 60px rgba(0,0,0,.8);overflow:hidden';
-      const wc = (text.match(/\S+/g) || []).length;
-      el.innerHTML = `
-        <div style="background:#e07b39;color:#1a1a1a;padding:10px 16px;font-weight:700;display:flex;justify-content:space-between">
-          <span>Review before submit</span><span id="__hh_fill_x" style="cursor:pointer;font-size:20px;">×</span>
-        </div>
-        <div style="padding:14px 16px;max-height:60vh;overflow-y:auto">
-          <div style="font-size:11px;color:#888;margin-bottom:6px;font-weight:700">PASTED INTO PAGE (${wc} words)</div>
-          <div style="background:#0e0e0e;border-left:3px solid #e07b39;border-radius:6px;padding:10px;font-size:13px;color:#eee;white-space:pre-wrap;max-height:300px;overflow-y:auto">${C.esc(text)}</div>
-        </div>
-        <div style="padding:12px 16px;background:#141414;border-top:1px solid #262626;display:flex;gap:8px">
-          <button id="__hh_fill_confirm" style="flex:1;padding:10px;border:0;border-radius:8px;background:#2e7d32;color:#fff;font-weight:700;font-size:13px;cursor:pointer">Submit on Page</button>
-          <button id="__hh_fill_manual" style="padding:10px 16px;border:0;border-radius:8px;background:#333;color:#ddd;font-weight:600;font-size:13px;cursor:pointer">Copy</button>
-          <button id="__hh_fill_cancel" style="padding:10px 16px;border:0;border-radius:8px;background:#5a1e1e;color:#ffd6d6;font-weight:600;font-size:13px;cursor:pointer">Cancel</button>
-        </div>`;
-      document.body.appendChild(el);
-      const done = v => { try { el.remove(); } catch {} resolve(v); };
-      document.getElementById('__hh_fill_x').onclick = () => done('cancel');
-      document.getElementById('__hh_fill_cancel').onclick = () => done('cancel');
-      document.getElementById('__hh_fill_manual').onclick = () => { try { navigator.clipboard.writeText(text); } catch {} done('manual'); };
-      document.getElementById('__hh_fill_confirm').onclick = () => done('confirm');
+      resolve('confirm');
     });
     if (choice !== 'confirm') { log('submit cancelled'); return; }
-    // find and click the page's submit button
     const rx = /^(submit|turn in|submit assignment|submit for grading|save and submit|save & submit|hand in)\b/i;
     const submitBtn = [...document.querySelectorAll('button, a, [role="button"], input[type="submit"]')]
       .filter(el => el.offsetParent !== null && !el.disabled && !el.closest('#__hh_ui'))
       .find(el => rx.test(((el.textContent || '') + ' ' + (el.value || '')).trim()) || rx.test(el.getAttribute('aria-label') || ''));
-    if (!submitBtn) { log('no submit button found on page — text is in the box'); return; }
+    if (!submitBtn) { log('no submit button found — text is in the box'); return; }
     log('clicking page submit:', (submitBtn.textContent || submitBtn.value || '').trim().slice(0, 40));
     submitBtn.click();
     await sleep(1500);
-    // confirm dialog if one appears
     const dialogScopes = ['[role="dialog"]', '.mdc-dialog', '.cdk-overlay-pane', '[class*="modal"]'];
     for (const scope of dialogScopes) {
       const root = document.querySelector(scope);
@@ -2456,7 +2311,6 @@ ${list}`;
         const blocks = await C.ocrPageImages();
         F.ocrText = blocks;
         log('OCR got', blocks.length, 'text block(s)');
-        // append into scraped steps view so user sees it
         if (blocks.length) {
           F.scrapedSteps = [...F.scrapedSteps, { label: 'OCR Image Text', content: blocks.join('\n\n') }];
           renderForge();
