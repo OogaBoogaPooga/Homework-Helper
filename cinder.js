@@ -2012,6 +2012,29 @@ Keep each step one action.`
     });
     return filtered.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
+  function extractQuotableLines(sourceText) {
+    // split into sentence-ish chunks
+    const chunks = String(sourceText)
+      .split(/\n|(?<=[.?!])\s+(?=[A-Z"“])/)
+      .map(l => l.trim())
+      .filter(l => l.length > 40 && l.length < 400);
+    // keep the ones that look like actual grievances / evidence
+    const lines = chunks.filter(l =>
+      /[""][^""]{30,}[""]/.test(l) ||
+      /\bHe has\b|\bShe has\b|\bThey have\b|\bWe have\b/.test(l) ||
+      /\bGovernment\b|\bLiberty\b|\bRights\b|\bTyranny\b|\bConsent\b/.test(l)
+    );
+    const seen = new Set();
+    const out = [];
+    for (const l of lines) {
+      const key = l.slice(0, 60).toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(l);
+      if (out.length >= 15) break;
+    }
+    return out;
+  }
   
   async function scrapeAllSteps() {
     // Schoology path first — different DOM
