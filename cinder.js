@@ -1851,17 +1851,17 @@ Answers:`;
 
   const TYPE_INSTRUCTIONS = {
     written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable unless a length is specified. No bullets unless the step itself is a list prompt.`,
-        saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use ACE: Answer the question directly, Cite specific evidence from the source, Explain how the evidence supports the answer. If multiple questions are offered and you must pick ONE, choose the one with the clearest evidence in the source text.
+            saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use ACE: Answer directly, Cite evidence, Explain the connection.
 
-Every claim must quote or paraphrase an ACTUAL line from the source text. When you cite, include the exact words in quotes. Prefer the specific grievances, facts, or phrases listed IN the document over the preamble/opening lines, unless the question is explicitly about the preamble.
+CRITICAL RULE: Only quote or paraphrase lines that appear VERBATIM in the SOURCE TEXT below. Do NOT quote from your memory of the document — if the exact words are not in the source text block, do not use them. This is the single most important rule.
+
+Every claim must use an ACTUAL line from the source. Put exact words in quotes. If you cannot find a line for a point, don't make that point.
 
 Structure (4-6 sentences):
 1. Direct answer to the question.
-2. Quote or paraphrase from the source (in quotation marks).
-3. A second piece of specific evidence from the source.
-4. Explain how the evidence proves your answer.
-
-Do NOT summarize in general terms ("taxes, quartering, lack of representation"). Quote or name the actual lines. If the source says "He has kept among us, in times of peace, Standing Armies without the Consent of our legislatures," use that — don't paraphrase it as "military presence."
+2. Quote an exact line from the source text.
+3. A second exact quote from the source text (if available).
+4. Explain how these quotes prove your answer.
 
 No bullets, no headers, no "In conclusion".`,
     
