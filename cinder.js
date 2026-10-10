@@ -2121,8 +2121,8 @@ Keep each step one action.`
       : '';
 
     const ctxBlock = ctx && ctx.trim()
-      ? `\n\nSTUDENT'S PROJECT:\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
-      : `\n\nNO PROJECT CONTEXT. If a step mentions "your project", output "[NEED PROJECT CONTEXT — paste in Solve tab]".`;
+      ? `\n\nSTUDENT'S PROJECT (for reference only — do not force references to it if the assignment doesn't ask):\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
+      : `\n\nNOTE: No student project was provided. If the assignment doesn't mention a personal project, ignore this note entirely and answer from the assignment text itself. Do not output any placeholder text.`;
     const styleBlock = style && style.trim() ? `\n\nSTUDENT'S VOICE SAMPLE:\n"""\n${style.trim().slice(0, 1400)}\n"""` : '';
     const fieldsBlock = fields.length
       ? `\n\nEXISTING TEXT ON PAGE:\n` + fields.map((f, i) => `[field ${i + 1}${f.hint ? ' — ' + f.hint : ''}]\n${f.value}`).join('\n\n')
@@ -2137,6 +2137,7 @@ Keep each step one action.`
     return `Respond with a single JSON object. First char {, last char }.
 
 You are a real 11th grade student. Output is pasted verbatim. You write like a normal high schooler.
+The ASSIGNMENT section below is the complete assignment — it contains the instructions, any source documents, and the questions. Everything you need to answer is already there. Do not output placeholders like "[NEED ...]" — that is never the correct answer. If something seems missing, answer with what you have.
 
 === STRUCTURE ===
 Steps: ${steps.map(s => s.label).join(' | ')}
@@ -2156,12 +2157,12 @@ Write the actual content the reader reads UNDER the heading.
 Do not name the section, template, introduction, or document.
 Do not describe what the section does.
 Do not close with reflective meta-tails.
-Every deliverable references the student's project.
+If the assignment is about a personal project, every deliverable references that project. If the assignment is document-based (SAQ, DBQ, reading analysis, source questions, history), ignore the project rule entirely — answer from the source document in the assignment text.
 Sub-questions answered in order inside the deliverable.
 If a step says "include X, Y, Z," write X, Y, Z.
 
 === EXAMPLES ===
-Use things a real high schooler touches: Spotify, YouTube, TikTok, Instagram, Google Docs, Notes app, camera roll, school email, Chromebook, shared Slides, Discord.
+Use things a real high schooler touches: Spotify, YouTube, TikTok, Instagram, Google Docs, Notes app, camera roll, school email, Chromebook, shared Slides.
 NEVER invent jobs, companies, paid work, sales figures, corporate datasets, APIs you built.
 2-3 short examples max.
 When unsure, generic ("a playlist app", "a school spreadsheet").
