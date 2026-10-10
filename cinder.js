@@ -1,7 +1,7 @@
 // language: JavaScript, file: homework-helper.js, runtime: browser console
-// Homework Helper — Auto (universal MCQ/text) + Ask + Solve + History + Settings.
-// Supports Buzz, Canvas, Schoology, DeltaMath, IXL, Khan, Google Forms, and any site with generic radios/text inputs.
-// Groq backend. Simple UI. × fully tears down.
+// Homework Helper — Auto + Ask + Solve + Submit + History + Settings + OCR.
+// Groq backend. Universal (Buzz, Canvas, Schoology, DeltaMath, IXL, Khan,
+// Google Forms, generic radios/texts). OCR via Tesseract.js (lazy-loaded).
 
 // ============================================================
 // CORE
@@ -42,12 +42,13 @@
     },
     autoStart: false,
     dryRun: false,
-    autoSubmitSec: saved.autoSubmitSec ?? 0
+    autoSubmitSec: saved.autoSubmitSec ?? 0,
+    ocrEnabled: saved.ocrEnabled ?? true
   };
   const saveCfg = () => {
     try { localStorage.setItem(LS, JSON.stringify({
       key: CFG.ai.key, model: CFG.ai.model, temperature: CFG.ai.temperature,
-      autoSubmitSec: CFG.autoSubmitSec
+      autoSubmitSec: CFG.autoSubmitSec, ocrEnabled: CFG.ocrEnabled
     })); } catch {}
   };
 
@@ -59,10 +60,17 @@
     lastAnswer: '—', lastQuestion: '—',
     log: [], history: [], chat: [],
     tokensIn: 0, tokensOut: 0, requests: 0,
-    platform: 'unknown'
+    platform: 'unknown',
+    consecutive429: 0
   };
 
-  const log = (...a) => { if (!KILLED) console.log('%c[hw-helper]', 'color:#e07b39;font-weight:bold', ...a); };
+  const log = (...a) => {
+    if (KILLED) return;
+    console.log('%c[hw-helper]', 'color:#e07b39;font-weight:bold', ...a);
+    const line = a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' ');
+    S.log.push(line);
+    if (S.log.length > 100) S.log.shift();
+  };
 
   // ============================================================
   // PLATFORM DETECTION
@@ -79,143 +87,6 @@
     if (/docs\.google\.com/.test(host) && /\/forms/.test(path)) return 'gforms';
     if (/quizizz|kahoot|quizlet/.test(host)) return 'quizapp';
     return 'generic';
-  }
-
-  // ============================================================
-  // BUZZ DOM
-  // ============================================================
-  const getQuestionBlocks = () => [...document.querySelectorAll('lib-question')].filter(b => b.offsetParent !== null);
-  const getChoices = b => [...b.querySelectorAll('input.mdc-radio__native-control, input.mdc-checkbox__native-control')];
-  const clickTargetFor = i => i.closest('label.mdc-form-field') || i.closest('label') || i.closest('mat-radio-button, mat-checkbox') || i;
-  const getQuestionText = b => {
-    const body = b.querySelector('lib-managed-html, .question-body');
-    return (body?.textContent || b.textContent || '').replace(/\s+/g, ' ').trim();
-  };
-  function getChoiceText(input) {
-    const lbl = input.getAttribute('aria-labelledby');
-    if (lbl) {
-      const parts = lbl.split(/\s+/).map(id => document.getElementById(id)).filter(Boolean);
-      if (parts.length) {
-        const t = parts.map(p => p.textContent).join(' ').replace(/\s+/g, ' ').trim();
-        if (t) return t;
-      }
-    }
-    const tr = input.closest('tr');
-    if (tr) {
-      const cells = [...tr.querySelectorAll('td')].filter(td => !td.classList.contains('choice-input') && !td.contains(input));
-      const t = cells.map(td => td.textContent).join(' ').replace(/\s+/g, ' ').trim();
-      if (t) return t;
-    }
-    const wrap = input.closest('mat-radio-button, mat-checkbox') || input.closest('label')?.parentElement;
-    return (wrap?.textContent || '').replace(/\s+/g, ' ').trim();
-  }
-  const isMultiSelect = b => !!b.querySelector('input.mdc-checkbox__native-control');
-
-  // ============================================================
-  // GENERIC DOM HELPERS (universal)
-  // ============================================================
-  function isOurs(el) { return !!(el && el.closest && el.closest('#__hh_ui')); }
-
-  function visibleEls(sel, root = document) {
-    return [...root.querySelectorAll(sel)].filter(el => el.offsetParent !== null && !isOurs(el));
-  }
-
-  function labelTextForInput(input) {
-    if (!input) return '';
-    // 1. for= attribute
-    const id = input.id;
-    if (id) {
-      const lab = document.querySelector('label[for="' + CSS.escape(id) + '"]');
-      if (lab && lab.textContent.trim()) return lab.textContent.replace(/\s+/g, ' ').trim();
-    }
-    // 2. wrapping label
-    const wrapLab = input.closest('label');
-    if (wrapLab) {
-      const clone = wrapLab.cloneNode(true);
-      const inp = clone.querySelector('input, textarea, select');
-      if (inp) inp.remove();
-      const t = clone.textContent.replace(/\s+/g, ' ').trim();
-      if (t) return t;
-    }
-    // 3. aria-label / aria-labelledby
-    const al = input.getAttribute('aria-label');
-    if (al && al.trim()) return al.trim();
-    const alb = input.getAttribute('aria-labelledby');
-    if (alb) {
-      const t = alb.split(/\s+/).map(x => document.getElementById(x)?.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
-      if (t) return t;
-    }
-    // 4. sibling / adjacent text
-    const sib = input.nextElementSibling;
-    if (sib && sib.textContent.trim().length > 0 && sib.textContent.length < 300) {
-      return sib.textContent.replace(/\s+/g, ' ').trim();
-    }
-    return '';
-  }
-
-  function questionTextForEl(el) {
-    if (!el) return '';
-    // walk up, look for a label, legend, heading, or question-classed container
-    let cur = el;
-    for (let i = 0; i < 8 && cur; i++) {
-      // check direct preceding siblings for question text
-      let sib = cur.previousElementSibling;
-      let hops = 0;
-      while (sib && hops < 3) {
-        const cls = (sib.className || '').toString().toLowerCase();
-        const tag = sib.tagName.toLowerCase();
-        const txt = (sib.textContent || '').replace(/\s+/g, ' ').trim();
-        if (txt && txt.length > 8 && txt.length < 800 && (
-          /question|prompt|stem|text|label|q-?text|problem|exercise/.test(cls) ||
-          ['p', 'legend', 'h1', 'h2', 'h3', 'h4'].includes(tag)
-        )) {
-          return txt;
-        }
-        sib = sib.previousElementSibling;
-        hops++;
-      }
-      // check for legends inside current
-      const legend = cur.querySelector('legend');
-      if (legend && legend.textContent.trim().length > 8) return legend.textContent.replace(/\s+/g, ' ').trim();
-      // next-ancestor
-      cur = cur.parentElement;
-      if (cur && cur.tagName === 'BODY') break;
-    }
-    // fallback: nearest form-group text
-    const group = el.closest('[class*="question"], [class*="prompt"], [class*="problem"], fieldset, form');
-    if (group) {
-      const t = (group.innerText || '').replace(/\s+/g, ' ').trim();
-      if (t.length > 8 && t.length < 1500) return t.slice(0, 600);
-    }
-    return '';
-  }
-
-  function fireInput(el, value) {
-    try {
-      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-        setter.call(el, value);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        return true;
-      }
-      if (el.isContentEditable) {
-        el.focus();
-        try { document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); } catch {}
-        fireKeystrokes(el, String(value).slice(0, 20));
-        document.execCommand('insertText', false, String(value));
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: String(value) }));
-        return true;
-      }
-    } catch (e) { log('fireInput failed:', e.message); }
-    return false;
-  }
-
-  function fireClick(el) {
-    if (!el) return;
-    try { el.click(); } catch {}
-    try { humanClick(el); } catch {}
   }
 
   // ============================================================
@@ -266,20 +137,236 @@
 
   function humanClick(el) {
     if (!el || KILLED) return;
+    try {
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
+      const cy = r.top + r.height / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
+      const o = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
+      el.dispatchEvent(new PointerEvent('pointerover', o));
+      el.dispatchEvent(new MouseEvent('mouseover', o));
+      el.dispatchEvent(new PointerEvent('pointermove', o));
+      el.dispatchEvent(new MouseEvent('mousemove', o));
+      el.dispatchEvent(new PointerEvent('pointerdown', o));
+      el.dispatchEvent(new MouseEvent('mousedown', o));
+      el.focus?.();
+      el.dispatchEvent(new PointerEvent('pointerup', o));
+      el.dispatchEvent(new MouseEvent('mouseup', o));
+      el.dispatchEvent(new MouseEvent('click', o));
+    } catch {
+      try { el.click(); } catch {}
+    }
+  }
+
+  // ============================================================
+  // OCR (Tesseract.js, lazy-loaded)
+  // ============================================================
+  let OCR_LOADING = null;
+  function loadTesseract() {
+    if (window.Tesseract) return Promise.resolve(window.Tesseract);
+    if (OCR_LOADING) return OCR_LOADING;
+    OCR_LOADING = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      s.onload = () => resolve(window.Tesseract);
+      s.onerror = () => reject(new Error('Tesseract load failed'));
+      document.head.appendChild(s);
+      killHooks.push(() => { try { s.remove(); } catch {} });
+    });
+    return OCR_LOADING;
+  }
+
+  async function ocrPageImages() {
+    if (!CFG.ocrEnabled || KILLED) return [];
+    // find large images that look like documents (not icons/avatars)
+    const candidates = [...document.querySelectorAll('img')].filter(img => {
+      if (img.offsetParent === null) return false;
+      const r = img.getBoundingClientRect();
+      if (r.width < 200 || r.height < 120) return false;
+      // skip if tiny by natural size too
+      if (img.naturalWidth && img.naturalWidth < 200) return false;
+      return true;
+    });
+    if (!candidates.length) return [];
+    log('OCR: found', candidates.length, 'candidate image(s)');
+    let T;
+    try { T = await loadTesseract(); }
+    catch (e) { log('OCR disabled — Tesseract failed to load:', e.message); return []; }
+    const results = [];
+    for (const img of candidates) {
+      if (KILLED) break;
+      try {
+        const { data: { text } } = await T.recognize(img.src, 'eng', { logger: () => {} });
+        const clean = (text || '').replace(/\s+/g, ' ').trim();
+        if (clean.length > 40) {
+          results.push(clean);
+          log('OCR: extracted', clean.length, 'chars from image');
+        }
+      } catch (e) { log('OCR fail on one image:', e.message); }
+    }
+    return results;
+  }
+
+  // ============================================================
+  // BUZZ DOM
+  // ============================================================
+  const getQuestionBlocks = () => [...document.querySelectorAll('lib-question')].filter(b => b.offsetParent !== null);
+  const getChoices = b => [...b.querySelectorAll('input.mdc-radio__native-control, input.mdc-checkbox__native-control')];
+  const clickTargetFor = i => i.closest('label.mdc-form-field') || i.closest('label') || i.closest('mat-radio-button, mat-checkbox') || i;
+  const getQuestionText = b => {
+    const body = b.querySelector('lib-managed-html, .question-body');
+    return (body?.textContent || b.textContent || '').replace(/\s+/g, ' ').trim();
+  };
+  function getChoiceText(input) {
+    const lbl = input.getAttribute('aria-labelledby');
+    if (lbl) {
+      const parts = lbl.split(/\s+/).map(id => document.getElementById(id)).filter(Boolean);
+      if (parts.length) {
+        const t = parts.map(p => p.textContent).join(' ').replace(/\s+/g, ' ').trim();
+        if (t) return t;
+      }
+    }
+    const tr = input.closest('tr');
+    if (tr) {
+      const cells = [...tr.querySelectorAll('td')].filter(td => !td.classList.contains('choice-input') && !td.contains(input));
+      const t = cells.map(td => td.textContent).join(' ').replace(/\s+/g, ' ').trim();
+      if (t) return t;
+    }
+    const wrap = input.closest('mat-radio-button, mat-checkbox') || input.closest('label')?.parentElement;
+    return (wrap?.textContent || '').replace(/\s+/g, ' ').trim();
+  }
+  const isMultiSelect = b => !!b.querySelector('input.mdc-checkbox__native-control');
+
+  // ============================================================
+  // GENERIC DOM HELPERS
+  // ============================================================
+  function isOurs(el) { return !!(el && el.closest && el.closest('#__hh_ui')); }
+
+  function visibleEls(sel, root = document) {
+    return [...root.querySelectorAll(sel)].filter(el => el.offsetParent !== null && !isOurs(el));
+  }
+
+  function labelTextForInput(input) {
+    if (!input) return '';
+    const id = input.id;
+    if (id) {
+      const lab = document.querySelector('label[for="' + CSS.escape(id) + '"]');
+      if (lab && lab.textContent.trim()) return lab.textContent.replace(/\s+/g, ' ').trim();
+    }
+    const wrapLab = input.closest('label');
+    if (wrapLab) {
+      const clone = wrapLab.cloneNode(true);
+      const inp = clone.querySelector('input, textarea, select');
+      if (inp) inp.remove();
+      const t = clone.textContent.replace(/\s+/g, ' ').trim();
+      if (t) return t;
+    }
+    const al = input.getAttribute('aria-label');
+    if (al && al.trim()) return al.trim();
+    const alb = input.getAttribute('aria-labelledby');
+    if (alb) {
+      const t = alb.split(/\s+/).map(x => document.getElementById(x)?.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
+      if (t) return t;
+    }
+    const sib = input.nextElementSibling;
+    if (sib && sib.textContent.trim().length > 0 && sib.textContent.length < 300) {
+      return sib.textContent.replace(/\s+/g, ' ').trim();
+    }
+    return '';
+  }
+
+  // broadened question-text resolver: nearest preceding text block > 80 chars
+  function nearestPrecedingText(el) {
+    let cur = el;
+    for (let depth = 0; depth < 10 && cur; depth++) {
+      let sib = cur.previousElementSibling;
+      let hops = 0;
+      while (sib && hops < 4) {
+        const t = (sib.innerText || sib.textContent || '').replace(/\s+/g, ' ').trim();
+        if (t.length >= 80 && t.length < 1500) return t;
+        sib = sib.previousElementSibling;
+        hops++;
+      }
+      cur = cur.parentElement;
+      if (!cur || cur.tagName === 'BODY') break;
+    }
+    // last resort: nearest heading before the element
+    const all = [...document.querySelectorAll('h1, h2, h3, h4, legend, p')];
     const r = el.getBoundingClientRect();
-    const cx = r.left + r.width / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
-    const cy = r.top + r.height / 2 + rand(-CFG.timing.jitterPx, CFG.timing.jitterPx);
-    const o = { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window };
-    el.dispatchEvent(new PointerEvent('pointerover', o));
-    el.dispatchEvent(new MouseEvent('mouseover', o));
-    el.dispatchEvent(new PointerEvent('pointermove', o));
-    el.dispatchEvent(new MouseEvent('mousemove', o));
-    el.dispatchEvent(new PointerEvent('pointerdown', o));
-    el.dispatchEvent(new MouseEvent('mousedown', o));
-    el.focus?.();
-    el.dispatchEvent(new PointerEvent('pointerup', o));
-    el.dispatchEvent(new MouseEvent('mouseup', o));
-    el.dispatchEvent(new MouseEvent('click', o));
+    let best = null, bestDist = Infinity;
+    for (const h of all) {
+      const hr = h.getBoundingClientRect();
+      if (hr.top > r.top) continue;
+      const d = r.top - hr.bottom;
+      if (d < bestDist && d < 600) { bestDist = d; best = h; }
+    }
+    if (best) {
+      const t = (best.innerText || best.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t.length >= 20) return t;
+    }
+    return '';
+  }
+
+  function questionTextForEl(el) {
+    if (!el) return '';
+    let cur = el;
+    for (let i = 0; i < 8 && cur; i++) {
+      let sib = cur.previousElementSibling;
+      let hops = 0;
+      while (sib && hops < 3) {
+        const cls = (sib.className || '').toString().toLowerCase();
+        const tag = sib.tagName.toLowerCase();
+        const txt = (sib.textContent || '').replace(/\s+/g, ' ').trim();
+        if (txt && txt.length > 8 && txt.length < 800 && (
+          /question|prompt|stem|text|label|q-?text|problem|exercise/.test(cls) ||
+          ['p', 'legend', 'h1', 'h2', 'h3', 'h4'].includes(tag)
+        )) {
+          return txt;
+        }
+        sib = sib.previousElementSibling;
+        hops++;
+      }
+      const legend = cur.querySelector('legend');
+      if (legend && legend.textContent.trim().length > 8) return legend.textContent.replace(/\s+/g, ' ').trim();
+      cur = cur.parentElement;
+      if (cur && cur.tagName === 'BODY') break;
+    }
+    const group = el.closest('[class*="question"], [class*="prompt"], [class*="problem"], fieldset, form');
+    if (group) {
+      const t = (group.innerText || '').replace(/\s+/g, ' ').trim();
+      if (t.length > 8 && t.length < 1500) return t.slice(0, 600);
+    }
+    // NEW: nearest preceding text fallback
+    const near = nearestPrecedingText(el);
+    if (near) return near.slice(0, 600);
+    return '';
+  }
+
+  function fireInput(el, value) {
+    try {
+      if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(el, value);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      if (el.isContentEditable) {
+        el.focus();
+        try { document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); } catch {}
+        fireKeystrokes(el, String(value).slice(0, 20));
+        document.execCommand('insertText', false, String(value));
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: String(value) }));
+        return true;
+      }
+    } catch (e) { log('fireInput failed:', e.message); }
+    return false;
+  }
+
+  function fireClick(el) {
+    if (!el) return;
+    try { el.click(); } catch {}
+    try { humanClick(el); } catch {}
   }
 
   // ============================================================
@@ -308,8 +395,11 @@
       const t = await res.text();
       const err = new Error('groq ' + res.status + ' ' + t.slice(0, 240));
       err.status = res.status; err.body = t;
+      if (res.status === 429) S.consecutive429++;
+      else S.consecutive429 = 0;
       throw err;
     }
+    S.consecutive429 = 0;
     S.requests++;
     if (!stream) {
       const j = await res.json();
@@ -342,6 +432,27 @@
     return full;
   }
 
+  // retry wrapper — 2 attempts with exponential backoff, then bail on 429 storm
+  async function groqCallRetry(messages, opts = {}, maxAttempts = 2) {
+    let lastErr = null;
+    for (let i = 0; i < maxAttempts; i++) {
+      if (KILLED) throw new Error('killed');
+      try {
+        return await groqCall(messages, opts);
+      } catch (e) {
+        lastErr = e;
+        if (e.message === 'killed') throw e;
+        if (S.consecutive429 >= 3) throw new Error('rate limited — stopping');
+        if (i < maxAttempts - 1) {
+          const wait = 1500 * Math.pow(2, i) + randInt(0, 800);
+          log('retry in', Math.round(wait / 1000) + 's:', e.message.slice(0, 80));
+          await sleep(wait);
+        }
+      }
+    }
+    throw lastErr;
+  }
+
   async function groqJson(prompt, maxTokens) {
     async function attempt(useJson) {
       const body = {
@@ -362,16 +473,26 @@
         const txt = await res.text();
         const err = new Error('groq ' + res.status + ' ' + txt.slice(0, 240));
         err.status = res.status; err.body = txt;
+        if (res.status === 429) S.consecutive429++;
+        else S.consecutive429 = 0;
         throw err;
       }
+      S.consecutive429 = 0;
+      S.requests++;
       const j = await res.json();
+      if (j.usage) { S.tokensIn += j.usage.prompt_tokens || 0; S.tokensOut += j.usage.completion_tokens || 0; }
       return j.choices?.[0]?.message?.content || '';
     }
     try { return await attempt(true); }
     catch (e) {
-      const jsonFail = e.status === 400 && /json_validate_failed|Failed to generate JSON/i.test(e.message || '');
-      if (!jsonFail) throw e;
-      log('JSON mode failed — retry without response_format');
+      // broadened JSON-failure detection
+      const jf = e.status === 400 && (
+        /json_validate_failed|Failed to generate JSON|Invalid response format|response_format|must contain the word "json"/i
+          .test(e.message || '') ||
+        /json/i.test(e.body || '')
+      );
+      if (!jf) throw e;
+      log('JSON mode rejected — retrying without response_format');
       return await attempt(false);
     }
   }
@@ -384,7 +505,6 @@
     const groups = {};
     for (const r of radios) {
       if (r.disabled) continue;
-      // skip if input is inside a Buzz lib-question (handled by buzz-specific path)
       if (r.closest('lib-question')) continue;
       const key = r.name || (r.getAttribute('data-group')) || (r.closest('fieldset') ? '__fs_' + (r.closest('fieldset').dataset.__hhId ||= Date.now() + '_' + Math.random()) : null) || '__single_' + (r.parentElement.dataset.__hhId ||= Date.now() + '_' + Math.random());
       if (!groups[key]) groups[key] = [];
@@ -413,7 +533,7 @@ ${choicesText}
 Reply ONLY with JSON: {"picks":[${group.multi ? '1,3' : '2'}]}`;
     let raw;
     try {
-      raw = await groqCall([{ role: 'user', content: prompt }], { json: true, maxTokens: 200 });
+      raw = await groqCallRetry([{ role: 'user', content: prompt }], { json: true, maxTokens: 200 });
     } catch (e) {
       log('generic MCQ failed:', e.message);
       return false;
@@ -452,13 +572,11 @@ Reply ONLY with JSON: {"picks":[${group.multi ? '1,3' : '2'}]}`;
     const out = [];
     for (const el of all) {
       if (el.disabled || el.readOnly) continue;
-      if (el.closest('lib-question')) continue;          // buzz path
+      if (el.closest('lib-question')) continue;
       if (el.closest('form[action*="search"], form[role="search"]')) continue;
       if (el.type === 'hidden') continue;
-      // skip if value already present
       const v = (el.value ?? el.innerText ?? '').trim();
       if (v && v.length > 0 && !el.isContentEditable) continue;
-      // skip tiny inputs that look like search
       const r = el.getBoundingClientRect();
       if (r.width > 0 && r.width < 80) continue;
       out.push(el);
@@ -480,7 +598,7 @@ ${aria ? 'Label: ' + aria : ''}
 Reply with ONLY the answer text — nothing else. No "Answer:", no quotes.`;
     let raw;
     try {
-      raw = await groqCall([{ role: 'user', content: prompt }], { maxTokens: 300, temperature: 0.3 });
+      raw = await groqCallRetry([{ role: 'user', content: prompt }], { maxTokens: 300, temperature: 0.3 });
     } catch (e) {
       log('generic text failed:', e.message);
       return false;
@@ -537,8 +655,13 @@ Reply with JSON only.`;
         if (picks.length) return { picks: [...new Set(picks)], why: (o.why || '').trim() };
       } catch {}
     }
-    const nums = String(raw).match(/\d+/g)?.map(Number) || [];
-    return { picks: [...new Set(nums)].filter(n => n >= 1 && n <= max), why: '' };
+    // fallback: pick the first digit in range — safer than grabbing all digits
+    const m = String(raw).match(/\b([1-9])\b/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n >= 1 && n <= max) return { picks: [n], why: '' };
+    }
+    return { picks: [], why: '' };
   }
 
   async function processQuestion(block) {
@@ -555,7 +678,7 @@ Reply with JSON only.`;
     const prompt = buildAutoPrompt(q, choices, multi);
     let raw, parsed;
     try {
-      raw = await groqCall([{ role: 'user', content: prompt }], { json: true });
+      raw = await groqCallRetry([{ role: 'user', content: prompt }], { json: true });
       parsed = parseAuto(raw, choices.length);
       if (!parsed.picks.length) throw new Error('no pick: ' + String(raw).slice(0, 100));
     } catch (e) {
@@ -563,7 +686,7 @@ Reply with JSON only.`;
       log('AI failed:', e.message);
       S.lastAnswer = 'AI error: ' + e.message;
       render();
-      if (/429/.test(e.message)) { await sleep(20000); return true; }
+      if (/rate limited/i.test(e.message)) { S.running = false; return false; }
       return false;
     }
 
@@ -603,7 +726,6 @@ Reply with JSON only.`;
     return 'next';
   }
 
-  // Buzz-specific loop
   async function loop() {
     if (S.busy || KILLED) return;
     if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') {
@@ -633,7 +755,6 @@ Reply with JSON only.`;
     if (!KILLED) { render(); log('buzz quiz loop stopped'); }
   }
 
-  // Universal loop
   async function universalLoop() {
     if (S.busy || KILLED) return;
     if (CFG.ai.key === 'PASTE_YOUR_REAL_KEY_HERE') {
@@ -689,7 +810,7 @@ Reply with JSON only.`;
   const stop = () => { S.running = false; render(); };
 
   // ============================================================
-  // FLASHCARD (Buzz)
+  // FLASHCARD
   // ============================================================
   function detectFlashcards() { return document.querySelector('lib-flash-cards-player'); }
   function getActiveFlashcard() { return document.querySelector('lib-flash-cards-player .card-ct.active .flashcard'); }
@@ -744,7 +865,6 @@ Reply with JSON only.`;
   // CLASSIFICATION + COMPLETION
   // ============================================================
   function classifyPage() {
-    // Buzz-specific signals first
     if (getQuestionBlocks().length) return 'buzz-quiz';
     if (detectFlashcards()) return 'buzz-cards';
     if (findMarkCompleteButton()) return 'buzz-lesson';
@@ -752,12 +872,10 @@ Reply with JSON only.`;
     const title = ((document.title || '') + ' ' + (document.querySelector('h1, [role="heading"]')?.textContent || '')).toLowerCase();
     const bodyHead = (document.body.innerText || '').slice(0, 2500).toLowerCase();
 
-    // Universal: MCQ groups or text inputs on any site
     const genericMCQs = collectGenericMCQs();
     const genericTexts = collectGenericTextInputs();
     if (genericMCQs.length >= 1 || genericTexts.length >= 2) return 'universal-quiz';
 
-    // Assignment signals
     if (/\b(assignment|submit|dropbox|rubric)\b/i.test(title)) return 'assignment';
     if (/\b(submit (your|this|the) assignment|dropbox|rubric|grading criteria)\b/i.test(bodyHead)) return 'assignment';
 
@@ -847,7 +965,7 @@ Reply with JSON only.`;
     });
   }
 
-  // ---- lesson chain (Buzz) ----
+  // ---- lesson chain ----
   function looksLikeQuestions(text) {
     if (!text) return false;
     const q = (text.match(/\?/g) || []).length;
@@ -947,7 +1065,7 @@ Reply with JSON only.`;
   }
 
   // ============================================================
-  // FILL MODE (Buzz)
+  // FILL MODE
   // ============================================================
   function hasPendingLesson() {
     try {
@@ -1038,7 +1156,6 @@ Reply with JSON only.`;
     }
   }
 
-  // ---- length parsing ----
   function parseLengthRequirement(text) {
     const t = (text || '').toLowerCase();
     let m = t.match(/at\s+least\s+(\d+)\s+words?/); if (m) return { kind: 'words', min: parseInt(m[1], 10), max: null, raw: m[0] };
@@ -1316,7 +1433,6 @@ Answers:`;
   }
   function stopContinuous() { __continuous = false; log('continuous OFF'); render(); }
 
-  // ---- smart start ----
   async function startSmart() {
     if (KILLED) return;
     if (S.running || __continuous) { stop(); stopContinuous(); return; }
@@ -1350,7 +1466,6 @@ Answers:`;
     render();
   }
 
-  // ---- chat ----
   async function sendChat(text) {
     if (KILLED || !text.trim()) return;
     S.chat.push({ role: 'user', content: text });
@@ -1385,7 +1500,7 @@ Answers:`;
     const el = document.createElement('div');
     el.id = UI_ID;
     el.innerHTML = `
-      <div id="${PID}" style="position:fixed;top:16px;right:16px;z-index:2147483647;width:320px;background:#1a1a1a;color:#f0f0f0;border:1px solid #e07b39;border-radius:10px;font:12px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.5);overflow:hidden;">
+      <div id="${PID}" style="position:fixed;top:16px;right:16px;z-index:2147483647;width:340px;background:#1a1a1a;color:#f0f0f0;border:1px solid #e07b39;border-radius:10px;font:12px/1.45 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.5);overflow:hidden;">
         <div id="${PID}_hdr" style="background:#e07b39;color:#1a1a1a;padding:8px 12px;font-weight:700;display:flex;justify-content:space-between;align-items:center;cursor:move;user-select:none;">
           <span>Homework Helper</span>
           <span id="${PID}_x" style="cursor:pointer;font-size:16px;">×</span>
@@ -1397,7 +1512,7 @@ Answers:`;
           <button class="hh-tab" data-tab="hist" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">History</button>
           <button class="hh-tab" data-tab="cfg" style="flex:1;background:transparent;border:0;color:#8a8a8a;padding:7px 6px;cursor:pointer;font-size:11px;font-weight:500;border-top-left-radius:6px;border-top-right-radius:6px;border-bottom:2px solid transparent;">Settings</button>
         </div>
-        <div style="padding:10px 12px;max-height:440px;overflow-y:auto;">
+        <div style="padding:10px 12px;max-height:480px;overflow-y:auto;">
           <div class="hh-view" data-view="auto">
             <div style="display:flex;gap:6px;margin-bottom:8px">
               <button id="${PID}_toggle" style="flex:1;padding:6px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Start</button>
@@ -1408,7 +1523,7 @@ Answers:`;
             <div style="font-size:11px;color:#aaa;margin-bottom:4px">Processed: <span id="${PID}_count">0</span> · Req: <span id="${PID}_req">0</span></div>
             <div style="font-size:11px;color:#aaa;margin-bottom:2px">Last Q: <span id="${PID}_lq" style="color:#ddd">—</span></div>
             <div style="font-size:11px;color:#aaa;margin-bottom:6px;word-break:break-word">Last A: <span id="${PID}_la" style="color:#4caf50">—</span></div>
-            <div id="${PID}_log" style="max-height:120px;overflow:auto;background:#0e0e0e;border-radius:6px;padding:6px;font:11px/1.4 ui-monospace,Menlo,monospace;color:#9ccc65;white-space:pre-wrap"></div>
+            <div id="${PID}_log" style="max-height:140px;overflow:auto;background:#0e0e0e;border-radius:6px;padding:6px;font:11px/1.4 ui-monospace,Menlo,monospace;color:#9ccc65;white-space:pre-wrap"></div>
           </div>
           <div class="hh-view" data-view="ask" style="display:none">
             <div id="${PID}_chat" style="display:flex;flex-direction:column;gap:6px;padding-bottom:6px;max-height:300px;overflow-y:auto"></div>
@@ -1422,6 +1537,7 @@ Answers:`;
             <select id="${PID}_fType" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
               <option value="">Auto-detect</option>
               <option value="written">Written (prose)</option>
+              <option value="saq">Short Answer (SAQ / ACE format)</option>
               <option value="presentation">Presentation / slides</option>
               <option value="infographic">Infographic / poster</option>
               <option value="canva">Canva / visual design</option>
@@ -1433,10 +1549,14 @@ Answers:`;
             <textarea id="${PID}_fCtx" placeholder="One line about your project." style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px;resize:vertical;height:50px"></textarea>
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px;font-weight:700">Voice sample (saved)</div>
             <textarea id="${PID}_fStyle" placeholder="Paste a paragraph you wrote." style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px;resize:vertical;height:60px"></textarea>
-            <div style="display:flex;gap:6px;margin-bottom:8px">
+            <div style="display:flex;gap:6px;margin-bottom:6px">
               <button id="${PID}_fGo" style="flex:1;padding:6px;border:0;border-radius:6px;background:#2e7d32;color:#fff;font-weight:600;cursor:pointer;font-size:12px">Solve</button>
-              <button id="${PID}_fCopy" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Copy All</button>
-              <button id="${PID}_fDl" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">.txt</button>
+              <button id="${PID}_fOcr" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">OCR</button>
+              <button id="${PID}_fCopy" style="padding:6px 10px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">Copy</button>
+            </div>
+            <div style="display:flex;gap:6px;margin-bottom:8px">
+              <button id="${PID}_fSubmit" style="flex:2;padding:8px;border:0;border-radius:6px;background:#c47a1a;color:#fff;font-weight:700;cursor:pointer;font-size:12px">Submit to Page</button>
+              <button id="${PID}_fDl" style="flex:1;padding:8px;border:0;border-radius:6px;background:#333;color:#ddd;cursor:pointer;font-size:12px">.txt</button>
             </div>
             <div style="font-size:11px;color:#aaa;margin-bottom:4px">Status: <span id="${PID}_fStatus">idle</span></div>
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Scraped steps</div>
@@ -1463,6 +1583,7 @@ Answers:`;
             <input id="${PID}_t" type="range" min="0" max="1" step="0.05" style="width:100%;accent-color:#e07b39">
             <div style="font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin:8px 0 3px;font-weight:700">Auto-submit (0 = off)</div>
             <input id="${PID}_auto" type="number" min="0" max="120" style="width:100%;background:#0e0e0e;color:#eee;border:1px solid #2a2a2a;border-radius:6px;padding:6px 9px;font:inherit;font-size:11px;margin-bottom:6px">
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:#aaa;margin:6px 0"><input id="${PID}_ocr" type="checkbox"> OCR images on page (Tesseract, slow first run)</label>
             <div style="font-size:10px;color:#666;margin-top:8px;text-align:center">Ctrl+Shift+H toggle · × closes & tears down</div>
           </div>
         </div>
@@ -1550,6 +1671,8 @@ Answers:`;
     $('_tv').textContent = CFG.ai.temperature.toFixed(2);
     const auto = $('_auto'); auto.value = CFG.autoSubmitSec;
     auto.oninput = () => { CFG.autoSubmitSec = parseInt(auto.value, 10) || 0; saveCfg(); };
+    const ocr = $('_ocr'); ocr.checked = CFG.ocrEnabled;
+    ocr.onchange = () => { CFG.ocrEnabled = !!ocr.checked; saveCfg(); };
 
     document.addEventListener('keydown', e => {
       if (KILLED) return;
@@ -1567,8 +1690,12 @@ Answers:`;
     try { S.running = false; S.busy = false; __continuous = false; } catch {}
     try { ABORT.abort(); } catch {}
     try { clrAll(); } catch {}
-    try { for (const h of killHooks) { try { h(); } catch {} } } catch {}
-    try { window.__helperKillHooks = []; } catch {}
+    // drain killHooks — no accumulation across re-pastes
+    try {
+      const hooks = window.__helperKillHooks || [];
+      for (const h of hooks) { try { h(); } catch {} }
+      window.__helperKillHooks = [];
+    } catch {}
     try { if (window.__helperForgeBoot) { clearInterval(window.__helperForgeBoot); window.__helperForgeBoot = null; } } catch {}
     try { document.getElementById(UI_ID)?.remove(); } catch {}
     try { document.getElementById('__hh_fill_popup')?.remove(); } catch {}
@@ -1582,7 +1709,7 @@ Answers:`;
   function renderLog() {
     const el = $('_log');
     if (!el) return;
-    el.innerHTML = S.log.slice(-30).map(l => {
+    el.innerHTML = S.log.slice(-40).map(l => {
       const cls = /err|fail/i.test(l) ? 'color:#ef5350' : 'color:#9ccc65';
       return `<div style="${cls}">${esc(l)}</div>`;
     }).join('');
@@ -1646,7 +1773,7 @@ Answers:`;
 
   window.__cinder = {
     CFG, S, log, esc, render,
-    groqCall, groqJson,
+    groqCall, groqJson, groqCallRetry,
     isKilled: () => KILLED,
     PID
   };
@@ -1671,7 +1798,7 @@ Answers:`;
 })();
 
 // ============================================================
-// SOLVE
+// SOLVE (+ Submit)
 // ============================================================
 (() => {
   'use strict';
@@ -1696,13 +1823,13 @@ Answers:`;
     project: localStorage.getItem(LS_CTX) || '',
     style: localStorage.getItem(LS_STY) || '',
     typeOverride: localStorage.getItem(LS_TYP) || '',
-    saveProject(v) { this.project = v; localStorage.setItem(LS_CTX, v); },
-    saveStyle(v) { this.style = v; localStorage.setItem(LS_STY, v); },
-    saveType(v) { this.typeOverride = v; localStorage.setItem(LS_TYP, v); }
+    saveProject(v) { this.project = v; try { localStorage.setItem(LS_CTX, v); } catch {} },
+    saveStyle(v) { this.style = v; try { localStorage.setItem(LS_STY, v); } catch {} },
+    saveType(v) { this.typeOverride = v; try { localStorage.setItem(LS_TYP, v); } catch {} }
   };
 
   const F = {
-    running: false, title: '', deliverables: [], scrapedSteps: [],
+    running: false, title: '', deliverables: [], scrapedSteps: [], ocrText: [],
     history: (() => { try { return JSON.parse(localStorage.getItem(LS_HIS) || '[]'); } catch { return []; } })()
   };
 
@@ -1714,6 +1841,7 @@ Answers:`;
     if (/\b(infographic|one[\s-]?pager|poster|brochure|flyer)\b/i.test(t)) return 'infographic';
     if (/\b(canva|word|google\s*docs)\s+(to\s+)?(make|create|build|design)/i.test(t) && /\b(infographic|poster|brochure|flyer)\b/i.test(t)) return 'infographic';
     if (/\b(canva|canva\.com)\b/i.test(t) || /\buse\s+canva\b/i.test(t) || /\bopen\s+canva\b/i.test(t) || /\bcreate.*?\bin\s+canva\b/i.test(t)) return 'canva';
+    if (/\b(saq|short[\s-]?answer|ace\s+format)\b/i.test(t)) return 'saq';
     if (/\b(slide|slides|presentation|powerpoint|google slides|deck|slideshow)\b/.test(t)) return 'presentation';
     if (/\b(flashcard|flash card|quizlet|anki|term and definition|vocab card)\b/.test(t)) return 'flashcards';
     if (/\b(record a video|loom|screencastify|voiceover|voice over|narrate)\b/.test(t)) return 'video';
@@ -1723,6 +1851,7 @@ Answers:`;
 
   const TYPE_INSTRUCTIONS = {
     written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable unless a length is specified. No bullets unless the step itself is a list prompt.`,
+    saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use the ACE format if the assignment names it (Answer the question, Cite specific evidence from the text, Explain how the evidence supports the answer). Otherwise: one direct answer sentence followed by 2-4 sentences of specific supporting evidence from the provided source. Every claim must cite or paraphrase an actual line, fact, or phrase from the source document. NO general knowledge — only what the text states. Length: 4-6 sentences unless a specific length is stated. No bullet points. No headers.`,
     infographic: `OUTPUT SHAPE: ONE deliverable — a content plan. NOT steps like "open Canva". Give the CONTENT.
 
 TITLE: <short, punchy title>
@@ -1831,7 +1960,7 @@ Keep each step one action.`
     }));
   }
 
-  function buildPrompt(steps, ctx, style, fields, type) {
+  function buildPrompt(steps, ctx, style, fields, type, ocrText) {
     const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 1800)}`).join('\n\n');
     let pendingBlock = '';
     try {
@@ -1845,6 +1974,10 @@ Keep each step one action.`
         }
       }
     } catch {}
+
+    const ocrBlock = (ocrText && ocrText.length)
+      ? `\n\nTEXT EXTRACTED FROM IMAGES ON THE PAGE (OCR — treat as primary source):\n"""\n${ocrText.join('\n\n---\n\n').slice(0, 4000)}\n"""`
+      : '';
 
     const ctxBlock = ctx && ctx.trim()
       ? `\n\nSTUDENT'S PROJECT:\n"""\n${ctx.trim().slice(0, 1200)}\n"""`
@@ -1897,7 +2030,7 @@ Bullets only if the step is a list prompt.
 Ban: furthermore, moreover, additionally, in conclusion, plays a crucial role, leverages, facilitates, underscores, optimal, robust.
 
 === ASSIGNMENT ===
-${stepBlob}${pendingBlock}${ctxBlock}${styleBlock}${fieldsBlock}
+${stepBlob}${pendingBlock}${ocrBlock}${ctxBlock}${styleBlock}${fieldsBlock}
 
 Schema:
 {"assignment_title":"<inferred>","deliverables":[{"label":"<step>","answer":"<text>"}]}
@@ -1957,25 +2090,31 @@ ${list}`;
         F.deliverables = [{ label: 'Error', answer: 'No assignment content detected.' }];
         renderForge(); return;
       }
+      // OCR pass — pull text out of images on the page
+      let ocrText = [];
+      try { ocrText = await C.ocrPageImages?.() || []; } catch (e) { log('OCR skipped:', e.message); }
+      F.ocrText = ocrText;
+      if (ocrText.length) log('OCR contributed', ocrText.length, 'text block(s)');
+
       const fields = findEditableFields();
-      const allText = steps.map(s => s.content).join('\n');
+      const allText = steps.map(s => s.content).join('\n') + '\n' + ocrText.join('\n');
       const detectedType = Ctx.typeOverride || detectType(allText);
       log('type:', detectedType);
-      const prompt = buildPrompt(steps, Ctx.project, Ctx.style, fields, detectedType);
+      const prompt = buildPrompt(steps, Ctx.project, Ctx.style, fields, detectedType, ocrText);
       log('prompt', prompt.length, 'chars');
       const raw = await C.groqJson(prompt, 5000);
       if (isDead()) return;
       const parsed = parse(raw);
       F.title = parsed.assignment_title || document.title || 'Assignment';
       F.deliverables = parsed.deliverables;
-      if (detectedType === 'written') {
+      if (detectedType === 'written' || detectedType === 'saq') {
         log('cleanup pass');
         F.deliverables = await cleanDeliverables(F.deliverables);
         if (isDead()) return;
       }
       F.history.unshift({ ts: Date.now(), title: F.title, steps: steps.length, deliverables: F.deliverables });
       F.history = F.history.slice(0, 30);
-      try { localStorage.setItem(LS_HIS, JSON.stringify(F.history)); } catch {}
+      try { localStorage.setItem(LS_HIS, JSON.stringify(F.history)); } catch (e) { log('history save failed (quota?):', e.message); }
       log('solved', F.deliverables.length, 'in', ((Date.now() - t0) / 1000).toFixed(1) + 's');
     } catch (e) {
       if (isDead() || e.message === 'killed') return;
@@ -1985,6 +2124,131 @@ ${list}`;
       F.running = false;
       if (!isDead()) renderForge();
     }
+  }
+
+  // ============================================================
+  // SUBMIT — find submission box, paste plain text, confirm
+  // ============================================================
+  function findSubmissionBox() {
+    // Look for a large textarea or contenteditable that could accept the answer
+    const cands = [...document.querySelectorAll('textarea, [contenteditable="true"]')]
+      .filter(el => el.offsetParent !== null && !el.closest('#__hh_ui'))
+      .map(el => {
+        const r = el.getBoundingClientRect();
+        return { el, r };
+      })
+      .filter(x => x.r.width > 150 && x.r.height > 40);
+    if (!cands.length) return null;
+    // pick the largest (most likely the answer field, not a comment box)
+    cands.sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+    return cands[0].el;
+  }
+
+  async function openSubmissionIfNeeded() {
+    let box = findSubmissionBox();
+    if (box) return box;
+    // try common "start writing" triggers
+    const rx = /add (submission|response|answer)|start (writing|typing)|write (a )?response|write (your )?answer|enter (your )?response|add comment|begin/i;
+    const triggers = [...document.querySelectorAll('button, a, [role="button"]')]
+      .filter(el => el.offsetParent !== null && !el.closest('#__hh_ui'))
+      .filter(el => rx.test((el.textContent || '').trim()) || rx.test(el.getAttribute('aria-label') || ''));
+    for (const t of triggers) {
+      try { C.log('[solve] clicking trigger:', (t.textContent || '').trim().slice(0, 40)); } catch {}
+      t.click();
+      await sleep(900);
+      box = findSubmissionBox();
+      if (box) return box;
+    }
+    return null;
+  }
+
+  async function pastePlainText(box, text) {
+    if (!box || !text) return false;
+    try {
+      box.focus();
+      if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
+        const proto = box.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(box, text);
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+        box.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+      // contenteditable: clear, then paste as plain text
+      try { document.execCommand('selectAll', false, null); document.execCommand('delete', false, null); } catch {}
+      // use execCommand insertText with plain string — avoids rich paste
+      const ok = document.execCommand('insertText', false, text);
+      if (!ok) box.innerText = text;
+      box.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: text }));
+      box.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    } catch (e) {
+      log('paste failed:', e.message);
+      return false;
+    }
+  }
+
+  async function submitToPage() {
+    if (isDead()) return;
+    if (!F.deliverables.length) { log('nothing to submit'); return; }
+    const text = F.deliverables.map(d => `[${d.label}]\n${d.answer}`).join('\n\n');
+    log('submit: looking for box…');
+    const box = await openSubmissionIfNeeded();
+    if (!box) { log('no submission box found'); try { C.log('[solve] no box'); } catch {} return; }
+    log('submit: pasting', text.length, 'chars');
+    const ok = await pastePlainText(box, text);
+    if (!ok) { log('paste failed'); return; }
+    log('submit: paste ok — showing confirm');
+    // reuse fill popup for confirmation
+    const lesson = { title: F.title || 'Assignment', text: F.deliverables.map(d => d.label).join('\n') };
+    const choice = await new Promise(resolve => {
+      // inline: use C.showFillPopup if exposed, else fall back to confirm
+      if (typeof window !== 'undefined' && C.showFillPopup) { C.showFillPopup(lesson, text, true).then(resolve); return; }
+      // fallback popup
+      const el = document.createElement('div');
+      el.id = '__hh_fill_popup';
+      el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;width:min(720px,92vw);background:#1a1a1a;color:#f0f0f0;border:2px solid #e07b39;border-radius:12px;font:13px/1.5 sans-serif;box-shadow:0 12px 60px rgba(0,0,0,.8);overflow:hidden';
+      const wc = (text.match(/\S+/g) || []).length;
+      el.innerHTML = `
+        <div style="background:#e07b39;color:#1a1a1a;padding:10px 16px;font-weight:700;display:flex;justify-content:space-between">
+          <span>Review before submit</span><span id="__hh_fill_x" style="cursor:pointer;font-size:20px;">×</span>
+        </div>
+        <div style="padding:14px 16px;max-height:60vh;overflow-y:auto">
+          <div style="font-size:11px;color:#888;margin-bottom:6px;font-weight:700">PASTED INTO PAGE (${wc} words)</div>
+          <div style="background:#0e0e0e;border-left:3px solid #e07b39;border-radius:6px;padding:10px;font-size:13px;color:#eee;white-space:pre-wrap;max-height:300px;overflow-y:auto">${C.esc(text)}</div>
+        </div>
+        <div style="padding:12px 16px;background:#141414;border-top:1px solid #262626;display:flex;gap:8px">
+          <button id="__hh_fill_confirm" style="flex:1;padding:10px;border:0;border-radius:8px;background:#2e7d32;color:#fff;font-weight:700;font-size:13px;cursor:pointer">Submit on Page</button>
+          <button id="__hh_fill_manual" style="padding:10px 16px;border:0;border-radius:8px;background:#333;color:#ddd;font-weight:600;font-size:13px;cursor:pointer">Copy</button>
+          <button id="__hh_fill_cancel" style="padding:10px 16px;border:0;border-radius:8px;background:#5a1e1e;color:#ffd6d6;font-weight:600;font-size:13px;cursor:pointer">Cancel</button>
+        </div>`;
+      document.body.appendChild(el);
+      const done = v => { try { el.remove(); } catch {} resolve(v); };
+      document.getElementById('__hh_fill_x').onclick = () => done('cancel');
+      document.getElementById('__hh_fill_cancel').onclick = () => done('cancel');
+      document.getElementById('__hh_fill_manual').onclick = () => { try { navigator.clipboard.writeText(text); } catch {} done('manual'); };
+      document.getElementById('__hh_fill_confirm').onclick = () => done('confirm');
+    });
+    if (choice !== 'confirm') { log('submit cancelled'); return; }
+    // find and click the page's submit button
+    const rx = /^(submit|turn in|submit assignment|submit for grading|save and submit|save & submit|hand in)\b/i;
+    const submitBtn = [...document.querySelectorAll('button, a, [role="button"], input[type="submit"]')]
+      .filter(el => el.offsetParent !== null && !el.disabled && !el.closest('#__hh_ui'))
+      .find(el => rx.test(((el.textContent || '') + ' ' + (el.value || '')).trim()) || rx.test(el.getAttribute('aria-label') || ''));
+    if (!submitBtn) { log('no submit button found on page — text is in the box'); return; }
+    log('clicking page submit:', (submitBtn.textContent || submitBtn.value || '').trim().slice(0, 40));
+    submitBtn.click();
+    await sleep(1500);
+    // confirm dialog if one appears
+    const dialogScopes = ['[role="dialog"]', '.mdc-dialog', '.cdk-overlay-pane', '[class*="modal"]'];
+    for (const scope of dialogScopes) {
+      const root = document.querySelector(scope);
+      if (!root || root.offsetParent === null) continue;
+      const cBtn = [...root.querySelectorAll('button, [role="button"]')].find(b => b.offsetParent !== null && !b.disabled &&
+        /^(yes|confirm|ok|submit|turn in|yes, submit)\b/i.test((b.textContent || '').trim()));
+      if (cBtn) { cBtn.click(); await sleep(1500); break; }
+    }
+    log('submit sequence done');
   }
 
   function inject() {
@@ -2002,6 +2266,21 @@ ${list}`;
     const go = $('_fGo'); if (go) go.onclick = forge;
     const cp = $('_fCopy'); if (cp) cp.onclick = copyAll;
     const dl = $('_fDl'); if (dl) dl.onclick = downloadTxt;
+    const sub = $('_fSubmit'); if (sub) sub.onclick = submitToPage;
+    const oc = $('_fOcr'); if (oc) oc.onclick = async () => {
+      if (F.running) return;
+      log('manual OCR triggered');
+      try {
+        const blocks = await C.ocrPageImages();
+        F.ocrText = blocks;
+        log('OCR got', blocks.length, 'text block(s)');
+        // append into scraped steps view so user sees it
+        if (blocks.length) {
+          F.scrapedSteps = [...F.scrapedSteps, { label: 'OCR Image Text', content: blocks.join('\n\n') }];
+          renderForge();
+        }
+      } catch (e) { log('OCR failed:', e.message); }
+    };
 
     renderForge();
   }
@@ -2036,7 +2315,7 @@ ${list}`;
     `).join('');
     out.querySelectorAll('[data-copy]').forEach(b => {
       b.onclick = () => {
-        navigator.clipboard.writeText(F.deliverables[+b.dataset.copy].answer);
+        try { navigator.clipboard.writeText(F.deliverables[+b.dataset.copy].answer); } catch {}
         b.textContent = '✓';
         setTimeout(() => b.textContent = 'Copy', 900);
       };
@@ -2050,8 +2329,8 @@ ${list}`;
     return parts.join('\n');
   }
   function copyAll() {
-    navigator.clipboard.writeText(bundle());
-    const b = $('_fCopy'); if (b) { b.textContent = '✓'; setTimeout(() => b.textContent = 'Copy All', 900); }
+    try { navigator.clipboard.writeText(bundle()); } catch {}
+    const b = $('_fCopy'); if (b) { b.textContent = '✓'; setTimeout(() => b.textContent = 'Copy', 900); }
   }
   function downloadTxt() {
     const blob = new Blob([bundle()], { type: 'text/plain' });
@@ -2075,5 +2354,5 @@ ${list}`;
     }
   }, 250);
 
-  window.__solve = { run: forge, F, scrape: scrapeAllSteps };
+  window.__solve = { run: forge, submit: submitToPage, F, scrape: scrapeAllSteps };
 })();
