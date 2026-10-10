@@ -2212,7 +2212,12 @@ ${list}`;
       if (!m) return deliverables;
       const o = JSON.parse(m[0]);
       if (!Array.isArray(o.items) || o.items.length !== deliverables.length) return deliverables;
-      return deliverables.map((d, i) => ({ ...d, answer: String(o.items[i] || d.answer).trim() }));
+      return deliverables.map((d, i) => {
+        const rewritten = String(o.items[i] || '').trim();
+        // only accept the rewrite if it's substantial — protects against the
+        // model returning empty/whitespace/single-char strings
+        return { ...d, answer: rewritten.length >= 20 ? rewritten : d.answer };
+      });
     } catch (e) {
       log('cleanup failed:', e.message);
       return deliverables;
@@ -2245,7 +2250,10 @@ ${list}`;
       log('prompt', prompt.length, 'chars');
       const raw = await C.groqJson(prompt, 5000);
       if (isDead()) return;
+      log('[solve] raw response length:', raw.length);
+      log('[solve] raw response head:', raw.slice(0, 400));
       const parsed = parse(raw);
+      log('[solve] parsed deliverables:', parsed.deliverables.map(d => ({ label: d.label, answerLen: (d.answer || '').length })));
       F.title = parsed.assignment_title || document.title || 'Assignment';
       F.deliverables = parsed.deliverables;
       if (detectedType === 'written' || detectedType === 'saq') {
