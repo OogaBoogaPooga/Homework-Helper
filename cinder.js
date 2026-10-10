@@ -2065,7 +2065,6 @@ Keep each step one action.`
 
   function buildPrompt(steps, ctx, style, fields, type, ocrText) {
     const stepBlob = steps.map(s => `### ${s.label}\n${s.content.slice(0, 1800)}`).join('\n\n');
-    The scraped text may contain Schoology navigation (Courses, Groups, Updates, Grades, Mastery, Materials, Members). IGNORE all of it. Only the assignment instructions and any source document matter.
     let pendingBlock = '';
     try {
       const raw = localStorage.getItem('__hh_pending_lesson');
