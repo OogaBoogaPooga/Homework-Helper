@@ -2259,11 +2259,33 @@ ${list}`;
       log('type:', detectedType);
       const prompt = buildPrompt(steps, Ctx.project, Ctx.style, fields, detectedType, ocrText);
       log('prompt', prompt.length, 'chars');
-      const raw = await C.groqJson(prompt, 5000);
+      const PLACEHOLDER_RX = /\[(NEED|REQUIRES?|INSERT|MISSING|PENDING|SOURCE TEXT|PROJECT CONTEXT)[^\]]*\]/i;
+
+      async function generateOnce(p) {
+        const r = await C.groqJson(p, 5000);
+        if (isDead()) return null;
+        log('[solve] raw response length:', r.length);
+        log('[solve] raw response head:', r.slice(0, 400));
+        return parse(r);
+      }
+
+      let parsed = await generateOnce(prompt);
       if (isDead()) return;
-      log('[solve] raw response length:', raw.length);
-      log('[solve] raw response head:', raw.slice(0, 400));
-      const parsed = parse(raw);
+
+      const anyPlaceholder = parsed.deliverables.some(d => PLACEHOLDER_RX.test(d.answer || ''));
+      if (anyPlaceholder) {
+        log('[solve] placeholder detected — retrying with correction prompt');
+        const correctionPrompt = prompt +
+          `\n\n=== CORRECTION ===\nYour previous response contained a placeholder like "[NEED SOURCE TEXT]" or similar. That is NOT acceptable output. The ASSIGNMENT section above contains the full instructions and the source document. Answer the actual question right now, in real sentences, in your own words. If you cannot quote, paraphrase. If you cannot paraphrase, describe. NEVER output anything in square brackets.`;
+        parsed = await generateOnce(correctionPrompt);
+        if (isDead()) return;
+      }
+
+      parsed.deliverables = parsed.deliverables.map(d => ({
+        ...d,
+        answer: String(d.answer || '').replace(PLACEHOLDER_RX, '').replace(/\s{2,}/g, ' ').trim()
+      }));
+
       log('[solve] parsed deliverables:', parsed.deliverables.map(d => ({ label: d.label, answerLen: (d.answer || '').length })));
       F.title = parsed.assignment_title || document.title || 'Assignment';
       F.deliverables = parsed.deliverables;
