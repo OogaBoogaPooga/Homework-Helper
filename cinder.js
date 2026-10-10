@@ -1851,7 +1851,19 @@ Answers:`;
 
   const TYPE_INSTRUCTIONS = {
     written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable unless a length is specified. No bullets unless the step itself is a list prompt.`,
-    saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use the ACE format if the assignment names it (Answer the question, Cite specific evidence from the text, Explain how the evidence supports the answer). Otherwise: one direct answer sentence followed by 2-4 sentences of specific supporting evidence from the provided source. Every claim must cite or paraphrase an actual line, fact, or phrase from the source document. NO general knowledge — only what the text states. Length: 4-6 sentences unless a specific length is stated. No bullet points. No headers.`,
+        saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use ACE: Answer the question directly, Cite specific evidence from the source, Explain how the evidence supports the answer.
+
+Every claim must quote or paraphrase an ACTUAL line from the source text. When you cite, include the exact words in quotes. Prefer the specific grievances, facts, or phrases listed IN the document over the preamble/opening lines, unless the question is explicitly about the preamble.
+
+Structure (4-6 sentences):
+1. Direct answer to the question.
+2. Quote or paraphrase from the source (in quotation marks).
+3. A second piece of specific evidence from the source.
+4. Explain how the evidence proves your answer.
+
+Do NOT summarize in general terms ("taxes, quartering, lack of representation"). Quote or name the actual lines. If the source says "He has kept among us, in times of peace, Standing Armies without the Consent of our legislatures," use that — don't paraphrase it as "military presence."
+
+No bullets, no headers, no "In conclusion".`,
     infographic: `OUTPUT SHAPE: ONE deliverable — a content plan. NOT steps like "open Canva". Give the CONTENT.
 
 TITLE: <short, punchy title>
@@ -2101,6 +2113,7 @@ EXCEPTION: infographic / presentation = ONE artifact. Merge ALL steps into one d
 Skip "Overview"/"Introduction" if they only describe the assignment.
 If a step is under 80 chars, ignore it and use the other steps.
 Label each deliverable EXACTLY as step label.
+If the assignment says "label which question you answer", pick ONE question (a, b, or c) and prefix the answer with that letter and a period, e.g. "a. The Declaration was written...". Do not answer more than one unless told to.
 
 === OUTPUT SHAPE ===
 Type: ${type}
