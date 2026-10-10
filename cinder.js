@@ -1851,17 +1851,19 @@ Answers:`;
 
   const TYPE_INSTRUCTIONS = {
     written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable unless a length is specified. No bullets unless the step itself is a list prompt.`,
-            saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use ACE: Answer directly, Cite evidence, Explain the connection.
+    saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use ACE: Answer directly, Cite evidence, Explain the connection.
 
-CRITICAL RULE: Only quote or paraphrase lines that appear VERBATIM in the SOURCE TEXT below. Do NOT quote from your memory of the document — if the exact words are not in the source text block, do not use them. This is the single most important rule.
+QUOTE RULE (about quotes only, not content): When you put text in quotation marks, it must be a line that appears VERBATIM in the source text below. Do NOT invent quotes from your memory of the full document. If a line is not in the source text, do not put quotation marks around it — say it in your own words instead.
 
-Every claim must use an ACTUAL line from the source. Put exact words in quotes. If you cannot find a line for a point, don't make that point.
+CONTENT RULE: You may use the full source text for context, framing, and explanation. A question about historical situation, purpose, or significance can be answered with context sentences in your own words — you just cannot pretend those sentences are quotes.
+
+NEVER REFUSE. Never say "the source text does not contain..." — that is not an acceptable answer. If no direct quote fits, answer in your own words with context from the text and cite whatever line comes closest, or cite nothing. A partial answer in your own words is always better than a refusal.
 
 Structure (4-6 sentences):
-1. Direct answer to the question.
-2. Quote an exact line from the source text.
-3. A second exact quote from the source text (if available).
-4. Explain how these quotes prove your answer.
+1. Direct answer to the question, in your own words.
+2. A quote (from the verified list, if one exists) OR a paraphrase of the source in your own words.
+3. A second piece of evidence from the source, quoted or paraphrased.
+4. Explain how the evidence proves your answer.
 
 No bullets, no headers, no "In conclusion".`,
     
@@ -2126,6 +2128,12 @@ Keep each step one action.`
       ? `\n\nEXISTING TEXT ON PAGE:\n` + fields.map((f, i) => `[field ${i + 1}${f.hint ? ' — ' + f.hint : ''}]\n${f.value}`).join('\n\n')
       : '';
 
+    const quotable = extractQuotableLines(stepBlob);
+    const quotableBlock = quotable.length
+      ? `\n\n=== VERIFIED QUOTES (use ONLY these when you put text in quotation marks) ===\nThe lines below are the ONLY strings you may place inside quotation marks. Everything else must be written in your own words — no quotes around paraphrases.\n\nThis is about QUOTES only. You may still use the full source text above for context, framing, and explanation.\n\n` +
+        quotable.map((l, i) => `[${i + 1}] ${l}`).join('\n')
+      : '';
+
     return `Respond with a single JSON object. First char {, last char }.
 
 You are a real 11th grade student. Output is pasted verbatim. You write like a normal high schooler.
@@ -2170,7 +2178,9 @@ Bullets only if the step is a list prompt.
 Ban: furthermore, moreover, additionally, in conclusion, plays a crucial role, leverages, facilitates, underscores, optimal, robust.
 
 === ASSIGNMENT ===
-The scraped text may contain Schoology navigation (Courses, Groups...). IGNORE all of it...
+The scraped text may contain Schoology navigation (Courses, Groups, Updates, Grades, Mastery, Materials, Members). IGNORE all of it. Only the assignment instructions and any source document matter. Only answer the actual assignment question; ignore dashboard chrome.
+NEVER refuse to answer. If a direct quote isn't on the verified list, answer in your own words from the source text. A partial answer is always better than a refusal.
+${quotableBlock}
 ${stepBlob}${pendingBlock}${ocrBlock}${ctxBlock}${styleBlock}${fieldsBlock}
 
 Schema:
