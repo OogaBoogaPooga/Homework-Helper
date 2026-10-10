@@ -1851,7 +1851,7 @@ Answers:`;
 
   const TYPE_INSTRUCTIONS = {
     written: `OUTPUT SHAPE: Flowing prose. Multiple paragraphs okay. Tight, 60–120 words per deliverable unless a length is specified. No bullets unless the step itself is a list prompt.`,
-        saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use ACE: Answer the question directly, Cite specific evidence from the source, Explain how the evidence supports the answer.
+        saq: `OUTPUT SHAPE: Short-answer response (SAQ). Use ACE: Answer the question directly, Cite specific evidence from the source, Explain how the evidence supports the answer. If multiple questions are offered and you must pick ONE, choose the one with the clearest evidence in the source text.
 
 Every claim must quote or paraphrase an ACTUAL line from the source text. When you cite, include the exact words in quotes. Prefer the specific grievances, facts, or phrases listed IN the document over the preamble/opening lines, unless the question is explicitly about the preamble.
 
@@ -1864,6 +1864,7 @@ Structure (4-6 sentences):
 Do NOT summarize in general terms ("taxes, quartering, lack of representation"). Quote or name the actual lines. If the source says "He has kept among us, in times of peace, Standing Armies without the Consent of our legislatures," use that — don't paraphrase it as "military presence."
 
 No bullets, no headers, no "In conclusion".`,
+    
     infographic: `OUTPUT SHAPE: ONE deliverable — a content plan. NOT steps like "open Canva". Give the CONTENT.
 
 TITLE: <short, punchy title>
